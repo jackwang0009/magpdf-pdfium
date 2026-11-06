@@ -140,6 +140,12 @@ config("pdfium_implementation_config") {
 config("pdfium_public_config") {
   defines = []
 
+  if (pdf_is_shared_lib) {
+    # Makes FPDF_EXPORT expand to dllexport / dllimport (see fpdfview.h) even
+    # though this is not a component build.
+    defines += [ "FPDF_SHARED_LIBRARY" ]
+  }
+
   if (pdf_enable_brotli) {
     defines += [ "PDF_ENABLE_BROTLI" ]
   }
@@ -229,7 +235,13 @@ group("pdfium_public_headers") {
   ]
 }
 
-component("pdfium") {
+if (pdf_is_shared_lib) {
+  pdfium_target_type = "shared_library"
+} else {
+  pdfium_target_type = "component"
+}
+
+target(pdfium_target_type, "pdfium") {
   output_name = "pdfium"
   libs = []
   configs += [ ":pdfium_strict_config" ]
