@@ -39,8 +39,12 @@ class CPDF_Color {
                           pdfium::span<float> values);
 
   uint32_t ComponentCount() const;
+  RetainPtr<CPDF_ColorSpace> GetColorSpace() const;
   bool IsColorSpaceRGB() const;
   bool IsColorSpaceGray() const;
+  // Returns the raw color components, as written by the sc/scn, g, rg or k
+  // operators. Returns an empty span for pattern colors.
+  pdfium::span<const float> GetComponents() const;
   // Wrapper around GetRGB() that returns the RGB value as FX_COLORREF. The
   // GetRGB() return value is clamped to fit into FX_COLORREF, where the color
   // components are 8-bit fields within an unsigned integer.

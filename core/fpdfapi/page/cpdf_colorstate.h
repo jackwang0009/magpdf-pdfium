@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "core/fpdfapi/page/cpdf_color.h"
+#include "core/fxcrt/bytestring.h"
 #include "core/fxcrt/retain_ptr.h"
 #include "core/fxcrt/shared_copy_on_write.h"
 #include "core/fxcrt/span.h"
@@ -42,14 +43,27 @@ class CPDF_ColorState {
   CPDF_Color* GetMutableStrokeColor();
   bool HasStrokeColor() const;
 
+  // `colorspace_name` is the name used by the cs/CS operator that selected
+  // `colorspace`, if any. It allows callers to refer to the same color space
+  // resource when writing the color back out.
   void SetFillColor(RetainPtr<CPDF_ColorSpace> colorspace,
-                    std::vector<float> values);
+                    std::vector<float> values,
+                    ByteString colorspace_name = ByteString());
   void SetStrokeColor(RetainPtr<CPDF_ColorSpace> colorspace,
-                      std::vector<float> values);
+                      std::vector<float> values,
+                      ByteString colorspace_name = ByteString());
   void SetFillPattern(RetainPtr<CPDF_Pattern> pattern,
-                      pdfium::span<float> values);
+                      pdfium::span<float> values,
+                      ByteString colorspace_name = ByteString());
   void SetStrokePattern(RetainPtr<CPDF_Pattern> pattern,
-                        pdfium::span<float> values);
+                        pdfium::span<float> values,
+                        ByteString colorspace_name = ByteString());
+  // Returns the name of the color space resource that selected the fill color
+  // space, or an empty string if the fill color space did not come from one.
+  ByteString GetFillColorSpaceName() const;
+  ByteString GetStrokeColorSpaceName() const;
+  void SetFillColorSpaceName(ByteString name);
+  void SetStrokeColorSpaceName(ByteString name);
 
   bool HasRef() const { return !!ref_; }
 
@@ -66,6 +80,8 @@ class CPDF_ColorState {
     FX_COLORREF stroke_color_ref_ = 0;
     CPDF_Color fill_color_;
     CPDF_Color stroke_color_;
+    ByteString fill_color_space_name_;
+    ByteString stroke_color_space_name_;
 
    private:
     ColorData();
@@ -75,10 +91,12 @@ class CPDF_ColorState {
 
   std::optional<FX_COLORREF> SetColor(RetainPtr<CPDF_ColorSpace> colorspace,
                                       std::vector<float> values,
-                                      CPDF_Color& color);
+                                      CPDF_Color& color,
+                                      ByteString* color_space_name);
   FX_COLORREF SetPattern(RetainPtr<CPDF_Pattern> pattern,
                          pdfium::span<float> values,
-                         CPDF_Color& color);
+                         CPDF_Color& color,
+                         ByteString* color_space_name);
 
   SharedCopyOnWrite<ColorData> ref_;
 };

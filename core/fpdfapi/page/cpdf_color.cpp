@@ -90,6 +90,17 @@ uint32_t CPDF_Color::ComponentCount() const {
   return cs_->ComponentCount();
 }
 
+RetainPtr<CPDF_ColorSpace> CPDF_Color::GetColorSpace() const {
+  return cs_;
+}
+
+pdfium::span<const float> CPDF_Color::GetComponents() const {
+  return std::holds_alternative<std::vector<float>>(color_data_)
+             ? pdfium::span<const float>(
+                   std::get<std::vector<float>>(color_data_))
+             : pdfium::span<const float>();
+}
+
 bool CPDF_Color::IsColorSpaceRGB() const {
   return cs_ ==
          CPDF_ColorSpace::GetStockCS(CPDF_ColorSpace::Family::kDeviceRGB);

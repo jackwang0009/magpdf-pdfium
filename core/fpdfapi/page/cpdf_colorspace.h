@@ -94,6 +94,15 @@ class CPDF_ColorSpace : public Retainable, public Observable {
 
   uint32_t ComponentCount() const;
   Family GetFamily() const { return family_; }
+
+  // Returns whether the color space was loaded from the /ColorSpace entry
+  // `name` in `resources`, i.e. whether `name cs` refers to this color space
+  // and `name` can be used to refer to it again.
+  bool NameIsDefinedInResources(const CPDF_Dictionary* resources,
+                                ByteStringView name) const;
+  // Returns the array that this color space was loaded from, if any. Empty for
+  // the stock color spaces.
+  RetainPtr<const CPDF_Array> GetArray() const { return array_; }
   bool IsSpecial() const {
     return GetFamily() == Family::kSeparation ||
            GetFamily() == Family::kDeviceN || GetFamily() == Family::kIndexed ||
@@ -117,6 +126,7 @@ class CPDF_ColorSpace : public Retainable, public Observable {
                                float* value,
                                float* min,
                                float* max) const;
+  virtual void GetMinMax(int iComponent, float* min, float* max) const;
 
   virtual void TranslateImageLine(pdfium::span<uint8_t> dest_span,
                                   pdfium::span<const uint8_t> src_span,

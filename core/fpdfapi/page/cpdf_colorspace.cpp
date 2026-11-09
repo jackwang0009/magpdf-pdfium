@@ -189,6 +189,7 @@ class CPDF_LabCS final : public CPDF_ColorSpace {
                        float* value,
                        float* min,
                        float* max) const override;
+  void GetMinMax(int iComponent, float* min, float* max) const override;
   void TranslateImageLine(pdfium::span<uint8_t> dest_span,
                           pdfium::span<const uint8_t> src_span,
                           int pixels,
@@ -198,6 +199,9 @@ class CPDF_LabCS final : public CPDF_ColorSpace {
   uint32_t v_Load(CPDF_Document* doc,
                   const CPDF_Array* pArray,
                   std::set<const CPDF_Object*>* pVisited) override;
+
+  // Returns the range value at `range_index` in the /Range array.
+  float GetLabRange(int range_index) const;
 
  private:
   static constexpr size_t kRangesCount = 4;
@@ -617,6 +621,24 @@ uint32_t CPDF_ColorSpace::ComponentCount() const {
   return components_;
 }
 
+bool CPDF_ColorSpace::NameIsDefinedInResources(const CPDF_Dictionary* resources,
+                                               ByteStringView name) const {
+  if (!resources) {
+    return false;
+  }
+
+  RetainPtr<const CPDF_Dictionary> color_space_list =
+      resources->GetDictFor("ColorSpace");
+  if (!color_space_list) {
+    return false;
+  }
+
+  RetainPtr<const CPDF_Array> array = color_space_list->GetArrayFor(name);
+  // Without an array, either the name is not defined or it is an alias for a
+  // color space that the name does not make any more specific.
+  return array_ && array_ == array.Get();
+}
+
 // Returns nullptr because only the CPDF_ICCBasedCS subclass supports ICC
 // profiles. CPDF_ICCBasedCS overrides this method to return valid ICC
 // profile data.
@@ -629,6 +651,10 @@ void CPDF_ColorSpace::GetDefaultValue(int iComponent,
                                       float* min,
                                       float* max) const {
   *value = 0.0f;
+  GetMinMax(iComponent, min, max);
+}
+
+void CPDF_ColorSpace::GetMinMax(int iComponent, float* min, float* max) const {
   *min = 0.0f;
   *max = 1.0f;
 }
@@ -823,6 +849,11 @@ void CPDF_LabCS::GetDefaultValue(int iComponent,
                                  float* value,
                                  float* min,
                                  float* max) const {
+  GetMinMax(iComponent, min, max);
+  *value = std::clamp(0.0f, *min, *max);
+}
+
+void CPDF_LabCS::GetMinMax(int iComponent, float* min, float* max) const {
   DCHECK_LT(iComponent, 3);
 
   if (iComponent > 0) {
@@ -831,14 +862,17 @@ void CPDF_LabCS::GetDefaultValue(int iComponent,
     if (range_min <= range_max) {
       *min = range_min;
       *max = range_max;
-      *value = std::clamp(0.0f, *min, *max);
       return;
     }
   }
 
   *min = 0.0f;
   *max = 100.0f;
-  *value = 0.0f;
+}
+
+float CPDF_LabCS::GetLabRange(int range_index) const {
+  DCHECK_LT(range_index, kRangesCount);
+  return ranges_[range_index];
 }
 
 uint32_t CPDF_LabCS::v_Load(CPDF_Document* doc,

@@ -735,23 +735,29 @@ void CPDF_StreamContentParser::Handle_ConcatMatrix() {
 }
 
 void CPDF_StreamContentParser::Handle_SetColorSpace_Fill() {
-  RetainPtr<CPDF_ColorSpace> pCS = FindColorSpace(GetString(0));
+  ByteString name = GetString(0);
+  // Ignore the operator as a whole if the color space name is unknown, so that
+  // the current color space stays the one its name refers to.
+  RetainPtr<CPDF_ColorSpace> pCS = FindColorSpace(name);
   if (!pCS) {
     return;
   }
 
   cur_states_->mutable_color_state().GetMutableFillColor()->SetColorSpace(
       std::move(pCS));
+  cur_states_->mutable_color_state().SetFillColorSpaceName(std::move(name));
 }
 
 void CPDF_StreamContentParser::Handle_SetColorSpace_Stroke() {
-  RetainPtr<CPDF_ColorSpace> pCS = FindColorSpace(GetString(0));
+  ByteString name = GetString(0);
+  RetainPtr<CPDF_ColorSpace> pCS = FindColorSpace(name);
   if (!pCS) {
     return;
   }
 
   cur_states_->mutable_color_state().GetMutableStrokeColor()->SetColorSpace(
       std::move(pCS));
+  cur_states_->mutable_color_state().SetStrokeColorSpaceName(std::move(name));
 }
 
 void CPDF_StreamContentParser::Handle_SetDash() {
@@ -945,13 +951,13 @@ void CPDF_StreamContentParser::Handle_EOFillPath() {
 void CPDF_StreamContentParser::Handle_SetGray_Fill() {
   cur_states_->mutable_color_state().SetFillColor(
       CPDF_ColorSpace::GetStockCS(CPDF_ColorSpace::Family::kDeviceGray),
-      GetNumbers(1));
+      GetNumbers(1), "DeviceGray");
 }
 
 void CPDF_StreamContentParser::Handle_SetGray_Stroke() {
   cur_states_->mutable_color_state().SetStrokeColor(
       CPDF_ColorSpace::GetStockCS(CPDF_ColorSpace::Family::kDeviceGray),
-      GetNumbers(1));
+      GetNumbers(1), "DeviceGray");
 }
 
 void CPDF_StreamContentParser::Handle_SetExtendGraphState() {
@@ -1003,7 +1009,7 @@ void CPDF_StreamContentParser::Handle_SetCMYKColor_Fill() {
 
   cur_states_->mutable_color_state().SetFillColor(
       CPDF_ColorSpace::GetStockCS(CPDF_ColorSpace::Family::kDeviceCMYK),
-      GetNumbers(4));
+      GetNumbers(4), "DeviceCMYK");
 }
 
 void CPDF_StreamContentParser::Handle_SetCMYKColor_Stroke() {
@@ -1013,7 +1019,7 @@ void CPDF_StreamContentParser::Handle_SetCMYKColor_Stroke() {
 
   cur_states_->mutable_color_state().SetStrokeColor(
       CPDF_ColorSpace::GetStockCS(CPDF_ColorSpace::Family::kDeviceCMYK),
-      GetNumbers(4));
+      GetNumbers(4), "DeviceCMYK");
 }
 
 void CPDF_StreamContentParser::Handle_LineTo() {
@@ -1081,7 +1087,7 @@ void CPDF_StreamContentParser::Handle_SetRGBColor_Fill() {
 
   cur_states_->mutable_color_state().SetFillColor(
       CPDF_ColorSpace::GetStockCS(CPDF_ColorSpace::Family::kDeviceRGB),
-      GetNumbers(3));
+      GetNumbers(3), "DeviceRGB");
 }
 
 void CPDF_StreamContentParser::Handle_SetRGBColor_Stroke() {
@@ -1091,7 +1097,7 @@ void CPDF_StreamContentParser::Handle_SetRGBColor_Stroke() {
 
   cur_states_->mutable_color_state().SetStrokeColor(
       CPDF_ColorSpace::GetStockCS(CPDF_ColorSpace::Family::kDeviceRGB),
-      GetNumbers(3));
+      GetNumbers(3), "DeviceRGB");
 }
 
 void CPDF_StreamContentParser::Handle_SetRenderIntent() {}
@@ -1107,12 +1113,43 @@ void CPDF_StreamContentParser::Handle_StrokePath() {
 
 void CPDF_StreamContentParser::Handle_SetColor_Fill() {
   int nargs = std::min(param_count_, 4U);
-  cur_states_->mutable_color_state().SetFillColor(nullptr, GetNumbers(nargs));
+  cur_states_->mutable_color_state().SetFillColor(nullptr, GetNumbers(nargs),
+                                                  GetCurrentColorSpaceName());
 }
 
 void CPDF_StreamContentParser::Handle_SetColor_Stroke() {
   int nargs = std::min(param_count_, 4U);
-  cur_states_->mutable_color_state().SetStrokeColor(nullptr, GetNumbers(nargs));
+  cur_states_->mutable_color_state().SetStrokeColor(nullptr, GetNumbers(nargs),
+                                                    GetCurrentColorSpaceName());
+}
+
+ByteString CPDF_StreamContentParser::GetCurrentColorSpaceName() const {
+  const CPDF_Color* color = cur_states_->color_state().GetFillColor();
+  if (!color || color->IsNull()) {
+    return ByteString();
+  }
+
+  RetainPtr<CPDF_ColorSpace> cs = color->GetColorSpace();
+  if (cs->IsSpecial()) {
+    return cur_states_->color_state().GetFillColorSpaceName();
+  }
+
+  switch (cs->GetFamily()) {
+    case CPDF_ColorSpace::Family::kDeviceRGB:
+      return "DeviceRGB";
+    case CPDF_ColorSpace::Family::kDeviceGray:
+      return "DeviceGray";
+    case CPDF_ColorSpace::Family::kDeviceCMYK:
+      return "DeviceCMYK";
+    case CPDF_ColorSpace::Family::kCalGray:
+      return "CalGray";
+    case CPDF_ColorSpace::Family::kCalRGB:
+      return "CalRGB";
+    case CPDF_ColorSpace::Family::kLab:
+      return "Lab";
+    default:
+      return ByteString();
+  }
 }
 
 void CPDF_StreamContentParser::Handle_SetColorPS_Fill() {
@@ -1122,7 +1159,8 @@ void CPDF_StreamContentParser::Handle_SetColorPS_Fill() {
   }
 
   if (!pLastParam->IsName()) {
-    cur_states_->mutable_color_state().SetFillColor(nullptr, GetColors());
+    cur_states_->mutable_color_state().SetFillColor(nullptr, GetColors(),
+                                                    GetCurrentColorSpaceName());
     return;
   }
 
@@ -1134,8 +1172,8 @@ void CPDF_StreamContentParser::Handle_SetColorPS_Fill() {
   }
 
   std::vector<float> values = GetNamedColors();
-  cur_states_->mutable_color_state().SetFillPattern(std::move(pPattern),
-                                                    values);
+  cur_states_->mutable_color_state().SetFillPattern(std::move(pPattern), values,
+                                                    GetCurrentColorSpaceName());
 }
 
 void CPDF_StreamContentParser::Handle_SetColorPS_Stroke() {
@@ -1145,7 +1183,8 @@ void CPDF_StreamContentParser::Handle_SetColorPS_Stroke() {
   }
 
   if (!pLastParam->IsName()) {
-    cur_states_->mutable_color_state().SetStrokeColor(nullptr, GetColors());
+    cur_states_->mutable_color_state().SetStrokeColor(
+        nullptr, GetColors(), GetCurrentColorSpaceName());
     return;
   }
 
@@ -1157,8 +1196,8 @@ void CPDF_StreamContentParser::Handle_SetColorPS_Stroke() {
   }
 
   std::vector<float> values = GetNamedColors();
-  cur_states_->mutable_color_state().SetStrokePattern(std::move(pPattern),
-                                                      values);
+  cur_states_->mutable_color_state().SetStrokePattern(
+      std::move(pPattern), values, GetCurrentColorSpaceName());
 }
 
 void CPDF_StreamContentParser::Handle_ShadeFill() {
