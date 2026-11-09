@@ -18,6 +18,7 @@
 #include "core/fxcrt/span.h"
 #include "core/fxcrt/unowned_ptr.h"
 
+class CPDF_ClipPath;
 class CPDF_Color;
 class CPDF_ColorSpace;
 class CPDF_ContentMarks;
@@ -90,6 +91,38 @@ class CPDF_PageContentGenerator {
   // Returns the name to use for `pattern` in an `scn`/`SCN` operator.
   ByteString GetPatternResourceName(RetainPtr<CPDF_Pattern> pattern,
                                     ByteString stored_name) const;
+  // Writes the path clip of `clip_path`: each path with its W/W* operator,
+  // terminated by the no-op `n` painting operator.
+  void WriteClipPath(fxcrt::ostringstream* buf,
+                     const CPDF_ClipPath& clip_path);
+  // Writes the graphics state of `pPageObj` (color, line width/cap/join/
+  // dash, clip path, ExtGState) without the enclosing `q`. ProcessGraphics()
+  // is `q` + WriteGraphicsState().
+  void WriteGraphicsState(fxcrt::ostringstream* buf,
+                          CPDF_PageObject* pPageObj,
+                          bool include_clip_path);
+  // Writes the text content of `pTextObj` (text matrix, font, Tc/Tw/Tr and
+  // the TJ) without the enclosing `BT...ET` or `q...Q`. `force_text_matrix`
+  // writes the Tm even when it is the identity matrix: a text that follows
+  // another text in the same BT...ET must reset the text position, it cannot
+  // rely on where the previous text ended. Returns false when the font
+  // cannot be written back (Type3); callers check CanWriteText() first.
+  bool WriteTextContent(fxcrt::ostringstream* buf,
+                        CPDF_TextObject* pTextObj,
+                        bool force_text_matrix);
+  // Whether the font of `pTextObj` can be written back. Type3 fonts cannot:
+  // their glyphs are arbitrary content streams. A missing font falls back
+  // to Helvetica, which can be written.
+  static bool CanWriteText(const CPDF_TextObject* pTextObj);
+  // Writes `texts` (in order) as the clip of the objects that follow them:
+  // one `q`, the path clip of the first text, then one `BT...ET` per entry
+  // of `group_sizes` (each group is the texts of one original BT...ET, so
+  // their glyphs are unioned within a group and the groups intersect, as
+  // the renderer does). The `q` is left open: the caller closes it once no
+  // later object needs the clip anymore.
+  void WriteTextClipGroup(fxcrt::ostringstream* buf,
+                          const std::vector<CPDF_TextObject*>& texts,
+                          const std::vector<size_t>& group_sizes);
   const CPDF_ContentMarks* ProcessContentMarks(fxcrt::ostringstream* buf,
                                                const CPDF_PageObject* pPageObj,
                                                const CPDF_ContentMarks* pPrev);

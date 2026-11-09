@@ -6,6 +6,7 @@
 
 #include "core/fpdfapi/edit/cpdf_pagecontentgenerator.h"
 
+#include <array>
 #include <map>
 #include <memory>
 #include <optional>
@@ -19,6 +20,7 @@
 #include "core/fpdfapi/edit/cpdf_stringarchivestream.h"
 #include "core/fpdfapi/font/cpdf_truetypefont.h"
 #include "core/fpdfapi/font/cpdf_type1font.h"
+#include "core/fpdfapi/page/cpdf_clippath.h"
 #include "core/fpdfapi/page/cpdf_color.h"
 #include "core/fpdfapi/page/cpdf_colorspace.h"
 #include "core/fpdfapi/page/cpdf_contentmarks.h"
@@ -32,6 +34,7 @@
 #include "core/fpdfapi/page/cpdf_pathobject.h"
 #include "core/fpdfapi/page/cpdf_pattern.h"
 #include "core/fpdfapi/page/cpdf_textobject.h"
+#include "core/fpdfapi/page/cpdf_textstate.h"
 #include "core/fpdfapi/page/cpdf_tilingpattern.h"
 #include "core/fpdfapi/parser/cpdf_array.h"
 #include "core/fpdfapi/parser/cpdf_dictionary.h"
@@ -303,6 +306,175 @@ void CloneResourcesDictEntries(CPDF_Document* doc,
   }
 }
 
+// A text object reduced to everything that determines the glyph outlines
+// it contributes to a clip path. Two texts with equal signatures contribute
+// identical outlines, so a text found in a later object's clip path can be
+// matched against the page objects by value: the clip path holds clones of
+// the text objects, not the page objects themselves.
+struct TextClipSignature {
+  RetainPtr<CPDF_Font> font;
+  float font_size = 0;
+  CFX_Matrix text_matrix;
+  CFX_PointF pos;
+  CFX_Matrix matrix;
+  std::array<float, 4> text_ctm = {1, 0, 0, 1};
+  int render_mode = 0;
+  std::vector<uint32_t> char_codes;
+  std::vector<float> char_kernings;
+  std::vector<float> char_positions;
+  float line_width = 1.0f;
+  int line_cap = 0;
+  int line_join = 0;
+  std::vector<float> dash_array;
+  float dash_phase = 0;
+
+  bool operator==(const TextClipSignature&) const = default;
+};
+
+TextClipSignature GetTextClipSignature(const CPDF_TextObject* text) {
+  TextClipSignature signature;
+  signature.font = text->GetFont();
+  signature.font_size = text->GetFontSize();
+  signature.text_matrix = text->GetTextMatrix();
+  signature.pos = text->GetPos();
+  // Text objects have no separate path/image matrix(); Transform() folds
+  // into the text matrix / position already captured above.
+  signature.matrix = CFX_Matrix();
+  pdfium::span<const float, 4> ctm = text->text_state().GetCTM();
+  for (size_t i = 0; i < 4; ++i) {
+    signature.text_ctm[i] = ctm[i];
+  }
+  signature.render_mode = static_cast<int>(text->GetTextRenderMode());
+  signature.char_codes = text->GetCharCodes();
+  signature.char_kernings = text->GetCharKernings();
+  signature.char_positions = text->GetCharPositions();
+  const CFX_GraphState& graph = text->graph_state();
+  signature.line_width = graph.GetLineWidth();
+  signature.line_cap = static_cast<int>(graph.GetLineCap());
+  signature.line_join = static_cast<int>(graph.GetLineJoin());
+  signature.dash_array = graph.GetLineDashArray();
+  signature.dash_phase = graph.GetLineDashPhase();
+  return signature;
+}
+
+// Splits the text list of `clip_path` into its null-terminated groups, one
+// per BT...ET that established the clip. The renderer unions the glyphs
+// within a group and intersects the groups.
+std::vector<std::vector<TextClipSignature>> GetClipTextGroups(
+    const CPDF_ClipPath& clip_path) {
+  std::vector<std::vector<TextClipSignature>> groups;
+  if (!clip_path.HasRef()) {
+    return groups;
+  }
+  std::vector<TextClipSignature> current;
+  for (size_t i = 0; i < clip_path.GetTextCount(); ++i) {
+    CPDF_TextObject* text = clip_path.GetText(i);
+    if (!text) {
+      if (!current.empty()) {
+        groups.push_back(std::move(current));
+        current.clear();
+      }
+    } else {
+      current.push_back(GetTextClipSignature(text));
+    }
+  }
+  if (!current.empty()) {
+    groups.push_back(std::move(current));
+  }
+  return groups;
+}
+
+// Whether two clip paths paint the same path clip: the same paths with the
+// same fill types, in the same order. The text list is not compared: it is
+// the clip the text itself establishes, not the clip that clips the text.
+bool ClipPathsEqual(const CPDF_ClipPath& lhs, const CPDF_ClipPath& rhs) {
+  const size_t lhs_count = lhs.HasRef() ? lhs.GetPathCount() : 0;
+  const size_t rhs_count = rhs.HasRef() ? rhs.GetPathCount() : 0;
+  if (lhs_count != rhs_count) {
+    return false;
+  }
+  for (size_t i = 0; i < lhs_count; ++i) {
+    if (lhs.GetClipType(i) != rhs.GetClipType(i)) {
+      return false;
+    }
+    CPDF_Path lhs_path = lhs.GetPath(i);
+    CPDF_Path rhs_path = rhs.GetPath(i);
+    pdfium::span<const CFX_Path::Point> lhs_points = lhs_path.GetPoints();
+    pdfium::span<const CFX_Path::Point> rhs_points = rhs_path.GetPoints();
+    if (lhs_points.size() != rhs_points.size()) {
+      return false;
+    }
+    for (size_t j = 0; j < lhs_points.size(); ++j) {
+      if (lhs_points[j].point_ != rhs_points[j].point_ ||
+          lhs_points[j].type_ != rhs_points[j].type_ ||
+          lhs_points[j].close_figure_ != rhs_points[j].close_figure_) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+// Whether the groups of `needle` appear in `haystack` as a contiguous
+// subsequence, in order. Clip groups nest: a group established inside
+// another group is only in effect while the outer group is, so the groups
+// a clip holds always appear in order.
+bool ClipGroupsContain(
+    const std::vector<std::vector<TextClipSignature>>& haystack,
+    const std::vector<std::vector<TextClipSignature>>& needle) {
+  if (needle.empty() || needle.size() > haystack.size()) {
+    return false;
+  }
+  for (size_t i = 0; i + needle.size() <= haystack.size(); ++i) {
+    bool match = true;
+    for (size_t j = 0; j < needle.size(); ++j) {
+      if (haystack[i + j] != needle[j]) {
+        match = false;
+        break;
+      }
+    }
+    if (match) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// The clip groups of a later object that the tail of `run` provides, as
+// the groups themselves (in order). Empty when the run provides none of
+// the later object's clip. The longest match wins: a run that spans two
+// BT...ETs matches both of the later object's groups, and a run whose
+// first BT is already closed matches only the second group's texts.
+std::vector<std::vector<TextClipSignature>> MatchClipRun(
+    pdfium::span<const TextClipSignature> run,
+    const std::vector<std::vector<TextClipSignature>>& clip_groups) {
+  std::vector<TextClipSignature> flat;
+  std::vector<size_t> starts;
+  for (const auto& group : clip_groups) {
+    starts.push_back(flat.size());
+    flat.insert(flat.end(), group.begin(), group.end());
+  }
+  for (size_t s = 0; s < starts.size(); ++s) {
+    const size_t len = flat.size() - starts[s];
+    if (len == 0 || len > run.size()) {
+      continue;
+    }
+    bool equal = true;
+    for (size_t i = 0; i < len; ++i) {
+      if (!(flat[starts[s] + i] == run[run.size() - len + i])) {
+        equal = false;
+        break;
+      }
+    }
+    if (!equal) {
+      continue;
+    }
+    return std::vector<std::vector<TextClipSignature>>(
+        clip_groups.begin() + s, clip_groups.end());
+  }
+  return {};
+}
+
 }  // namespace
 
 CPDF_PageContentGenerator::CPDF_PageContentGenerator(
@@ -370,7 +542,42 @@ CPDF_PageContentGenerator::GenerateModifiedStreams() {
   }
 
   // Process the page objects, write into each dirty stream.
-  for (auto& pPageObj : page_objects_) {
+  //
+  // A text clip group (Tr 4-7) keeps its `q` open across the objects it
+  // clips: the clip a BT...ET establishes only survives while the `q`
+  // around it stays open, and the objects the text clips are exactly the
+  // ones whose clip path still holds the group's texts. Writing the text
+  // on its own (as ProcessText() does) closes the `q` right away, so the
+  // clipped objects would paint unclipped.
+  struct OpenClipGroup {
+    // The BT...ET groups of the clip, in order.
+    std::vector<std::vector<TextClipSignature>> groups;
+  };
+  std::vector<OpenClipGroup> open_groups;
+  int32_t current_stream = CPDF_PageObject::kNoContentStream;
+  auto close_groups_not_in = [&](fxcrt::ostringstream* buf,
+                                 const CPDF_PageObject* obj) {
+    std::vector<std::vector<TextClipSignature>> groups =
+        GetClipTextGroups(obj->clip_path());
+    while (!open_groups.empty() &&
+           !ClipGroupsContain(groups, open_groups.back().groups)) {
+      *buf << " Q\n";
+      open_groups.pop_back();
+    }
+  };
+  auto close_all_groups = [&](int32_t stream_index) {
+    auto stream_it = streams.find(stream_index);
+    if (stream_it == streams.end()) {
+      return;
+    }
+    while (!open_groups.empty()) {
+      stream_it->second << " Q\n";
+      open_groups.pop_back();
+    }
+  };
+
+  for (size_t obj_index = 0; obj_index < page_objects_.size(); ++obj_index) {
+    CPDF_PageObject* pPageObj = page_objects_[obj_index].get();
     if (!pPageObj->IsActive()) {
       continue;
     }
@@ -381,11 +588,144 @@ CPDF_PageContentGenerator::GenerateModifiedStreams() {
       continue;
     }
 
+    if (stream_index != current_stream) {
+      // A clip cannot span content streams: the `q` that holds it must
+      // close in the stream that opened it.
+      if (current_stream != CPDF_PageObject::kNoContentStream) {
+        close_all_groups(current_stream);
+      }
+      current_stream = stream_index;
+    }
+
     fxcrt::ostringstream* buf = &it->second;
     empty_streams.erase(stream_index);
+
+    CPDF_TextObject* pTextObj = pPageObj->AsText();
+    if (pTextObj &&
+        TextRenderingModeIsClipMode(pTextObj->GetTextRenderMode())) {
+      // Collect the run of consecutive clip-mode texts in this stream.
+      std::vector<CPDF_TextObject*> run;
+      std::vector<TextClipSignature> run_signatures;
+      size_t run_end = obj_index;
+      for (size_t j = obj_index; j < page_objects_.size(); ++j) {
+        CPDF_PageObject* candidate = page_objects_[j].get();
+        if (!candidate->IsActive() ||
+            candidate->GetContentStream() != stream_index) {
+          break;
+        }
+        CPDF_TextObject* candidate_text = candidate->AsText();
+        if (!candidate_text ||
+            !TextRenderingModeIsClipMode(
+                candidate_text->GetTextRenderMode())) {
+          break;
+        }
+        run.push_back(candidate_text);
+        run_signatures.push_back(GetTextClipSignature(candidate_text));
+        run_end = j + 1;
+      }
+
+      // The first active object after the run decides: if its clip holds
+      // the run's texts, the run's `q` must stay open across it. Any
+      // object after the run that does not hold them proves the `q` was
+      // already closed, so a later object holding the same glyphs again
+      // is a new clip, not this one.
+      const CPDF_PageObject* clip_user = nullptr;
+      for (size_t j = run_end; j < page_objects_.size(); ++j) {
+        CPDF_PageObject* candidate = page_objects_[j].get();
+        if (candidate->GetContentStream() != stream_index) {
+          break;
+        }
+        if (!candidate->IsActive()) {
+          continue;
+        }
+        clip_user = candidate;
+        break;
+      }
+
+      // The matched groups, longest first: drop leading groups whose
+      // texts cannot be grouped (unwritable font, content marks, or a
+      // path clip that differs from the first text's) and retry.
+      std::vector<std::vector<TextClipSignature>> matched;
+      if (clip_user) {
+        matched = MatchClipRun(run_signatures,
+                               GetClipTextGroups(clip_user->clip_path()));
+      }
+      std::vector<CPDF_TextObject*> grouped_texts;
+      std::vector<size_t> group_sizes;
+      size_t used_drop = matched.size();
+      for (size_t drop = 0; drop < matched.size(); ++drop) {
+        size_t count = 0;
+        for (size_t g = drop; g < matched.size(); ++g) {
+          count += matched[g].size();
+        }
+        std::vector<CPDF_TextObject*> candidate_texts(run.end() - count,
+                                                      run.end());
+        bool usable = true;
+        for (CPDF_TextObject* text : candidate_texts) {
+          if (!CanWriteText(text)) {
+            usable = false;
+            break;
+          }
+          const CPDF_ContentMarks* marks = text->GetContentMarks();
+          if (marks && marks->CountItems() != 0) {
+            usable = false;
+            break;
+          }
+        }
+        if (usable) {
+          for (size_t i = 1; i < candidate_texts.size(); ++i) {
+            if (!ClipPathsEqual(candidate_texts[0]->clip_path(),
+                               candidate_texts[i]->clip_path())) {
+              usable = false;
+              break;
+            }
+          }
+        }
+        if (usable) {
+          grouped_texts = std::move(candidate_texts);
+          for (size_t g = drop; g < matched.size(); ++g) {
+            group_sizes.push_back(matched[g].size());
+          }
+          used_drop = drop;
+          break;
+        }
+      }
+
+      if (!grouped_texts.empty()) {
+        // Write the texts before the grouped tail one by one (their clips
+        // are closed already), then the tail as one clip group.
+        const size_t head_count = run.size() - grouped_texts.size();
+        for (size_t i = 0; i < head_count; ++i) {
+          CPDF_PageObject* head = run[i];
+          close_groups_not_in(buf, head);
+          current_content_marks[stream_index] = ProcessContentMarks(
+              buf, head, current_content_marks[stream_index]);
+          ProcessPageObject(buf, head);
+        }
+        close_groups_not_in(buf, grouped_texts.front());
+        current_content_marks[stream_index] = ProcessContentMarks(
+            buf, grouped_texts.front(), current_content_marks[stream_index]);
+        WriteTextClipGroup(buf, grouped_texts, group_sizes);
+        std::vector<std::vector<TextClipSignature>> groups(
+            matched.begin() + used_drop, matched.end());
+        open_groups.push_back(OpenClipGroup{std::move(groups)});
+        obj_index = run_end - 1;
+        continue;
+      }
+      // No clip to preserve: fall through and write this text on its own.
+      // The next text in the run gets its own chance on the next pass.
+    }
+
+    close_groups_not_in(buf, pPageObj);
     current_content_marks[stream_index] =
         ProcessContentMarks(buf, pPageObj, current_content_marks[stream_index]);
     ProcessPageObject(buf, pPageObj);
+  }
+
+  // Close any clip group still open at the end of its stream, before the
+  // streams are finished (which closes the outer `q`).
+  if (current_stream != CPDF_PageObject::kNoContentStream) {
+    close_all_groups(current_stream);
   }
 
   // Finish dirty streams.
@@ -1053,6 +1393,37 @@ ByteString CPDF_PageContentGenerator::GetPatternResourceName(
 void CPDF_PageContentGenerator::ProcessGraphics(fxcrt::ostringstream* buf,
                                                 CPDF_PageObject* pPageObj) {
   *buf << "q ";
+  WriteGraphicsState(buf, pPageObj, /*include_clip_path=*/true);
+}
+
+void CPDF_PageContentGenerator::WriteClipPath(fxcrt::ostringstream* buf,
+                                              const CPDF_ClipPath& clip_path) {
+  if (!clip_path.HasRef()) {
+    return;
+  }
+  for (size_t i = 0; i < clip_path.GetPathCount(); ++i) {
+    CPDF_Path path = clip_path.GetPath(i);
+    ProcessPathPoints(buf, &path);
+    switch (clip_path.GetClipType(i)) {
+      case CFX_FillRenderOptions::FillType::kWinding:
+        *buf << " W ";
+        break;
+      case CFX_FillRenderOptions::FillType::kEvenOdd:
+        *buf << " W* ";
+        break;
+      case CFX_FillRenderOptions::FillType::kNoFill:
+        NOTREACHED();
+    }
+
+    // Use a no-op path-painting operator to terminate the path without
+    // causing any marks to be placed on the page.
+    *buf << "n ";
+  }
+}
+
+void CPDF_PageContentGenerator::WriteGraphicsState(fxcrt::ostringstream* buf,
+                                                   CPDF_PageObject* pPageObj,
+                                                   bool include_clip_path) {
   const CPDF_ColorState& color_state = pPageObj->color_state();
   WriteColorToStream(*buf, color_state.GetFillColor(),
                      color_state.GetFillColorSpaceName(),
@@ -1085,26 +1456,8 @@ void CPDF_PageContentGenerator::ProcessGraphics(fxcrt::ostringstream* buf,
     WriteFloat(*buf, pPageObj->graph_state().GetLineDashPhase()) << " d ";
   }
 
-  const CPDF_ClipPath& clip_path = pPageObj->clip_path();
-  if (clip_path.HasRef()) {
-    for (size_t i = 0; i < clip_path.GetPathCount(); ++i) {
-      CPDF_Path path = clip_path.GetPath(i);
-      ProcessPathPoints(buf, &path);
-      switch (clip_path.GetClipType(i)) {
-        case CFX_FillRenderOptions::FillType::kWinding:
-          *buf << " W ";
-          break;
-        case CFX_FillRenderOptions::FillType::kEvenOdd:
-          *buf << " W* ";
-          break;
-        case CFX_FillRenderOptions::FillType::kNoFill:
-          NOTREACHED();
-      }
-
-      // Use a no-op path-painting operator to terminate the path without
-      // causing any marks to be placed on the page.
-      *buf << "n ";
-    }
+  if (include_clip_path) {
+    WriteClipPath(buf, pPageObj->clip_path());
   }
 
   GraphicsData graphD;
@@ -1180,6 +1533,32 @@ ByteString CPDF_PageContentGenerator::GetOrCreateDefaultGraphics() const {
 // TJ sets the actual text, <####...> is used when specifying charcodes.
 void CPDF_PageContentGenerator::ProcessText(fxcrt::ostringstream* buf,
                                             CPDF_TextObject* pTextObj) {
+  if (!CanWriteText(pTextObj)) {
+    // Type3 fonts cannot be written back: their glyphs are arbitrary content
+    // streams. Skip the object without emitting the "q" and "BT" that would
+    // otherwise leave the stream unbalanced and swallow everything after it.
+    return;
+  }
+
+  ProcessGraphics(buf, pTextObj);
+  *buf << "BT ";
+  WriteTextContent(buf, pTextObj, /*force_text_matrix=*/false);
+  *buf << " ET";
+  EndProcessGraphics(*buf);
+}
+
+bool CPDF_PageContentGenerator::CanWriteText(const CPDF_TextObject* pTextObj) {
+  RetainPtr<CPDF_Font> font(pTextObj->GetFont());
+  if (!font) {
+    // Falls back to Helvetica, which can be written.
+    return true;
+  }
+  return font->IsType1Font() || font->IsTrueTypeFont() || font->IsCIDFont();
+}
+
+bool CPDF_PageContentGenerator::WriteTextContent(fxcrt::ostringstream* buf,
+                                                 CPDF_TextObject* pTextObj,
+                                                 bool force_text_matrix) {
   RetainPtr<CPDF_Font> font(pTextObj->GetFont());
   if (!font) {
     font = CPDF_Font::GetStockFont(document_, "Helvetica");
@@ -1196,18 +1575,12 @@ void CPDF_PageContentGenerator::ProcessText(fxcrt::ostringstream* buf,
   } else if (font->IsCIDFont()) {
     data.type = "Type0";
   } else {
-    // Type3 fonts cannot be written back: their glyphs are arbitrary content
-    // streams. Skip the object without emitting the "q" and "BT" that would
-    // otherwise leave the stream unbalanced and swallow everything after it.
-    return;
+    return false;
   }
   data.baseFont = font->GetBaseFontName();
 
-  ProcessGraphics(buf, pTextObj);
-  *buf << "BT ";
-
   const CFX_Matrix& matrix = pTextObj->GetTextMatrix();
-  if (!matrix.IsIdentity()) {
+  if (force_text_matrix || !matrix.IsIdentity()) {
     WriteMatrix(*buf, matrix) << " Tm ";
   }
 
@@ -1265,6 +1638,38 @@ void CPDF_PageContentGenerator::ProcessText(fxcrt::ostringstream* buf,
   if (!text.IsEmpty()) {
     *buf << PDF_HexEncodeString(text.AsStringView());
   }
-  *buf << "] TJ ET";
-  EndProcessGraphics(*buf);
+  *buf << "] TJ";
+  return true;
+}
+
+void CPDF_PageContentGenerator::WriteTextClipGroup(
+    fxcrt::ostringstream* buf,
+    const std::vector<CPDF_TextObject*>& texts,
+    const std::vector<size_t>& group_sizes) {
+  // One `q` for the whole clip, the path clip of the first text, then one
+  // BT...ET per original BT...ET group. The `q` is left open: the caller
+  // closes it once no later object needs the clip anymore.
+  *buf << "q ";
+  WriteClipPath(buf, texts.front()->clip_path());
+  size_t index = 0;
+  for (size_t group_size : group_sizes) {
+    *buf << "BT ";
+    for (size_t i = 0; i < group_size; ++i) {
+      CPDF_TextObject* text = texts[index];
+      if (i > 0) {
+        // Separate from the previous text's TJ, which has no trailing
+        // space.
+        *buf << " ";
+      }
+      // The graphics state of each text (color, line, ExtGState) goes
+      // inside the BT...ET, as the original file does; the path clip is
+      // already written above and is the same for all texts in the group.
+      WriteGraphicsState(buf, text, /*include_clip_path=*/false);
+      WriteTextContent(buf, text, /*force_text_matrix=*/index > 0);
+      ++index;
+    }
+    // The newline separates this ET from the next BT...ET, the next object,
+    // or the `Q` that closes the group.
+    *buf << " ET\n";
+  }
 }

@@ -53,6 +53,13 @@ class CPDFPageContentGeneratorTest : public TestWithPageModule {
                        CPDF_TextObject* pTextObj) {
     pGen->ProcessText(buf, pTextObj);
   }
+
+  void TestWriteTextClipGroup(CPDF_PageContentGenerator* pGen,
+                              fxcrt::ostringstream* buf,
+                              const std::vector<CPDF_TextObject*>& texts,
+                              const std::vector<size_t>& group_sizes) {
+    pGen->WriteTextClipGroup(buf, texts, group_sizes);
+  }
 };
 
 TEST_F(CPDFPageContentGeneratorTest, ProcessRect) {
@@ -609,6 +616,72 @@ TEST_F(CPDFPageContentGeneratorTest, ProcessColorSpaces) {
     ByteString path_string(buf);
     EXPECT_EQ(ByteString("q /FXC1 cs 1 scn 10 5 3 25 re f Q\n"), path_string);
   }
+}
+
+TEST_F(CPDFPageContentGeneratorTest, ProcessTextClipGroup) {
+  auto doc = std::make_unique<CPDF_TestDocument>();
+  doc->CreateNewDoc();
+
+  RetainPtr<CPDF_Dictionary> pPageDict(doc->CreateNewPage(0));
+  auto pTestPage = pdfium::MakeRetain<CPDF_Page>(doc.get(), pPageDict);
+  CPDF_PageContentGenerator generator(pTestPage.Get());
+
+  auto make_clip_text = [&](const char* text, float x) {
+    auto pTextObj = std::make_unique<CPDF_TextObject>();
+    pTextObj->mutable_text_state().SetFont(
+        CPDF_Font::GetStockFont(doc.get(), "Times-Roman"));
+    pTextObj->mutable_text_state().SetFontSize(22.0f);
+    pTextObj->mutable_text_state().SetTextMode(
+        TextRenderingMode::MODE_CLIP);
+    pTextObj->Transform(CFX_Matrix(1, 0, 0, 1, x, 25));
+    pTextObj->SetText(text);
+    return pTextObj;
+  };
+  auto text1 = make_clip_text("Two", 20);
+  auto text2 = make_clip_text("Blocks", 110);
+
+  // Two texts from one BT...ET stay in one BT...ET.
+  fxcrt::ostringstream buf;
+  TestWriteTextClipGroup(&generator, &buf, {text1.get(), text2.get()}, {2});
+  ByteString text_string(buf);
+  // One `q` for the whole clip, left open: no closing `Q`.
+  EXPECT_EQ('q', text_string[0]);
+  EXPECT_FALSE(text_string.Contains(" Q\n"));
+  EXPECT_TRUE(text_string.Contains("BT "));
+  EXPECT_TRUE(text_string.Contains(" 7 Tr [<54776F>] TJ"));
+  EXPECT_TRUE(text_string.Contains(" 7 Tr [<426C6F636B73>] TJ"));
+  auto first_tj = text_string.Find(" 7 Tr [<54776F>] TJ");
+  auto second_tj = text_string.Find(" 7 Tr [<426C6F636B73>] TJ");
+  ASSERT_TRUE(first_tj.has_value());
+  ASSERT_TRUE(second_tj.has_value());
+  EXPECT_LT(first_tj.value(), second_tj.value());
+  // Both texts share one font resource at 22pt.
+  EXPECT_TRUE(text_string.Contains(" 22 Tf "));
+  auto first_slash = text_string.Find('/');
+  auto last_slash = text_string.ReverseFind('/');
+  ASSERT_TRUE(first_slash.has_value());
+  ASSERT_TRUE(last_slash.has_value());
+  EXPECT_LT(first_slash.value(), last_slash.value());
+  ByteString first_font = text_string.Substr(first_slash.value() + 1);
+  ByteString last_font = text_string.Substr(last_slash.value() + 1);
+  auto first_space = first_font.Find(" ");
+  auto last_space = last_font.Find(" ");
+  ASSERT_TRUE(first_space.has_value());
+  ASSERT_TRUE(last_space.has_value());
+  EXPECT_EQ(first_font.First(first_space.value()),
+            last_font.First(last_space.value()));
+  // The second text needs its own text matrix: it cannot rely on where the
+  // first text ended.
+  EXPECT_TRUE(text_string.Contains("1 0 0 1 110 25 Tm "));
+
+  // Two texts from two BT...ETs become two BT...ETs under the same `q`.
+  buf.str("");
+  TestWriteTextClipGroup(&generator, &buf, {text1.get(), text2.get()},
+                         {1, 1});
+  text_string = ByteString(buf);
+  EXPECT_EQ('q', text_string[0]);
+  EXPECT_FALSE(text_string.Contains(" Q\n"));
+  EXPECT_TRUE(text_string.Contains(" ET\nBT "));
 }
 
 TEST_F(CPDFPageContentGeneratorTest, ProcessEmptyForm) {
