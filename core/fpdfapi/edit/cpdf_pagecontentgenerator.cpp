@@ -943,14 +943,6 @@ ByteString CPDF_PageContentGenerator::GetOrCreateDefaultGraphics() const {
 // TJ sets the actual text, <####...> is used when specifying charcodes.
 void CPDF_PageContentGenerator::ProcessText(fxcrt::ostringstream* buf,
                                             CPDF_TextObject* pTextObj) {
-  ProcessGraphics(buf, pTextObj);
-  *buf << "BT ";
-
-  const CFX_Matrix& matrix = pTextObj->GetTextMatrix();
-  if (!matrix.IsIdentity()) {
-    WriteMatrix(*buf, matrix) << " Tm ";
-  }
-
   RetainPtr<CPDF_Font> font(pTextObj->GetFont());
   if (!font) {
     font = CPDF_Font::GetStockFont(document_, "Helvetica");
@@ -967,9 +959,20 @@ void CPDF_PageContentGenerator::ProcessText(fxcrt::ostringstream* buf,
   } else if (font->IsCIDFont()) {
     data.type = "Type0";
   } else {
+    // Type3 fonts cannot be written back: their glyphs are arbitrary content
+    // streams. Skip the object without emitting the "q" and "BT" that would
+    // otherwise leave the stream unbalanced and swallow everything after it.
     return;
   }
   data.baseFont = font->GetBaseFontName();
+
+  ProcessGraphics(buf, pTextObj);
+  *buf << "BT ";
+
+  const CFX_Matrix& matrix = pTextObj->GetTextMatrix();
+  if (!matrix.IsIdentity()) {
+    WriteMatrix(*buf, matrix) << " Tm ";
+  }
 
   ByteString dict_name;
   std::optional<ByteString> maybe_name = obj_holder_->FontsMapSearch(data);
