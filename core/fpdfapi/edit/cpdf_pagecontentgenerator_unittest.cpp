@@ -447,6 +447,53 @@ TEST_F(CPDFPageContentGeneratorTest, ProcessText) {
   EXPECT_EQ("Helvetica", font_desc->GetNameFor("FontName"));
 }
 
+TEST_F(CPDFPageContentGeneratorTest, ProcessTextCharAndWordSpace) {
+  auto doc = std::make_unique<CPDF_TestDocument>();
+  doc->CreateNewDoc();
+
+  RetainPtr<CPDF_Dictionary> pPageDict(doc->CreateNewPage(0));
+  auto pTestPage = pdfium::MakeRetain<CPDF_Page>(doc.get(), pPageDict);
+  CPDF_PageContentGenerator generator(pTestPage.Get());
+
+  // Non-default Tc and Tw must be written before the text showing operator.
+  {
+    auto pTextObj = std::make_unique<CPDF_TextObject>();
+    pTextObj->mutable_text_state().SetFont(
+        CPDF_Font::GetStockFont(doc.get(), "Times-Roman"));
+    pTextObj->mutable_text_state().SetFontSize(10.0f);
+    pTextObj->mutable_text_state().SetCharSpace(0.5f);
+    pTextObj->mutable_text_state().SetWordSpace(-1.25f);
+    pTextObj->SetText("ab");
+
+    fxcrt::ostringstream buf;
+    TestProcessText(&generator, &buf, pTextObj.get());
+    ByteString text_string(buf);
+    // The q/Q pair encloses the whole text object, so Tc and Tw are restored
+    // and cannot leak into the objects that follow.
+    EXPECT_TRUE(text_string.Contains(" 10 Tf .5 Tc -1.25 Tw 0 Tr "));
+    EXPECT_EQ('q', text_string[0]);
+    EXPECT_EQ("Q\n", text_string.Last(2));
+    EXPECT_EQ('q', text_string[0]);
+    EXPECT_EQ("Q\n", text_string.Last(2));
+  }
+
+  // Default values are not written.
+  {
+    auto pTextObj = std::make_unique<CPDF_TextObject>();
+    pTextObj->mutable_text_state().SetFont(
+        CPDF_Font::GetStockFont(doc.get(), "Times-Roman"));
+    pTextObj->mutable_text_state().SetFontSize(10.0f);
+    pTextObj->SetText("ab");
+
+    fxcrt::ostringstream buf;
+    TestProcessText(&generator, &buf, pTextObj.get());
+    ByteString text_string(buf);
+    EXPECT_FALSE(text_string.Contains(" Tc "));
+    EXPECT_FALSE(text_string.Contains(" Tw "));
+    EXPECT_TRUE(text_string.Contains(" 10 Tf 0 Tr "));
+  }
+}
+
 TEST_F(CPDFPageContentGeneratorTest, ProcessEmptyForm) {
   auto doc = std::make_unique<CPDF_TestDocument>();
   doc->CreateNewDoc();

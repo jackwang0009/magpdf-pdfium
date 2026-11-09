@@ -997,6 +997,18 @@ void CPDF_PageContentGenerator::ProcessText(fxcrt::ostringstream* buf,
 
   *buf << "/" << PDF_NameEncode(dict_name) << " ";
   WriteFloat(*buf, pTextObj->GetFontSize()) << " Tf ";
+
+  // Tc and Tw are part of the graphics state, so the enclosing q/Q pair
+  // restores them. Only write non-default values to avoid bloating the stream.
+  float char_space = pTextObj->text_state().GetCharSpace();
+  if (char_space != 0.0f) {
+    WriteFloat(*buf, char_space) << " Tc ";
+  }
+  float word_space = pTextObj->text_state().GetWordSpace();
+  if (word_space != 0.0f) {
+    WriteFloat(*buf, word_space) << " Tw ";
+  }
+
   *buf << static_cast<int>(pTextObj->GetTextRenderMode()) << " Tr ";
 
   *buf << "[";
