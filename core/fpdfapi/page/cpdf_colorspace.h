@@ -103,6 +103,10 @@ class CPDF_ColorSpace : public Retainable, public Observable {
   // Returns the array that this color space was loaded from, if any. Empty for
   // the stock color spaces.
   RetainPtr<const CPDF_Array> GetArray() const { return array_; }
+
+  // Returns the color space that this one is based on, if any. This is the
+  // second element of a pattern color space.
+  virtual RetainPtr<CPDF_ColorSpace> GetBaseColorSpace() const;
   bool IsSpecial() const {
     return GetFamily() == Family::kSeparation ||
            GetFamily() == Family::kDeviceN || GetFamily() == Family::kIndexed ||

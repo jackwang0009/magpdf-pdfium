@@ -20,6 +20,9 @@ class CPDF_BasedCS : public CPDF_ColorSpace {
 
   void EnableStdConversion(bool bEnabled) final;
 
+  // CPDF_ColorSpace:
+  RetainPtr<CPDF_ColorSpace> GetBaseColorSpace() const override;
+
  protected:
   explicit CPDF_BasedCS(Family family);
 

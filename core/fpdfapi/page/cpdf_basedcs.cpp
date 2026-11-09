@@ -16,3 +16,7 @@ void CPDF_BasedCS::EnableStdConversion(bool bEnabled) {
     base_cs_->EnableStdConversion(bEnabled);
   }
 }
+
+RetainPtr<CPDF_ColorSpace> CPDF_BasedCS::GetBaseColorSpace() const {
+  return base_cs_;
+}

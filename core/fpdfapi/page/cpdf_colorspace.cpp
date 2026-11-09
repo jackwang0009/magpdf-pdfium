@@ -621,6 +621,10 @@ uint32_t CPDF_ColorSpace::ComponentCount() const {
   return components_;
 }
 
+RetainPtr<CPDF_ColorSpace> CPDF_ColorSpace::GetBaseColorSpace() const {
+  return nullptr;
+}
+
 bool CPDF_ColorSpace::NameIsDefinedInResources(const CPDF_Dictionary* resources,
                                                ByteStringView name) const {
   if (!resources) {

@@ -135,11 +135,11 @@ class CPDF_StreamContentParser {
   std::vector<float> GetNamedColors() const;
   int32_t GetCurrentStreamIndex();
 
-  // Returns the name of the fill color space in `cur_states_`, as it would be
-  // written by a cs operator. This is the resource name for color spaces that
-  // are defined in the resources dictionary, and a device color space name for
-  // the ones that are not.
-  ByteString GetCurrentColorSpaceName() const;
+  // Returns the name of the fill or stroke color space in `cur_states_`, as it
+  // would be written by a cs/CS operator. This is the resource name for color
+  // spaces that are defined in the resources dictionary, and a device color
+  // space name for the ones that are not.
+  ByteString GetCurrentColorSpaceName(bool for_fill) const;
 
   void Handle_CloseFillStrokePath();
   void Handle_FillStrokePath();
