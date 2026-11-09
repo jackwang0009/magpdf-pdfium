@@ -6,6 +6,7 @@
 
 #include <iterator>
 #include <memory>
+#include <set>
 #include <utility>
 
 #include "core/fpdfapi/font/cpdf_font.h"
@@ -17,9 +18,11 @@
 #include "core/fpdfapi/page/cpdf_textobject.h"
 #include "core/fpdfapi/page/cpdf_textstate.h"
 #include "core/fpdfapi/page/test_with_page_module.h"
+#include "core/fpdfapi/parser/cpdf_array.h"
 #include "core/fpdfapi/parser/cpdf_dictionary.h"
 #include "core/fpdfapi/parser/cpdf_document.h"
 #include "core/fpdfapi/parser/cpdf_name.h"
+#include "core/fpdfapi/parser/cpdf_number.h"
 #include "core/fpdfapi/parser/cpdf_parser.h"
 #include "core/fpdfapi/parser/cpdf_reference.h"
 #include "core/fpdfapi/parser/cpdf_stream.h"
@@ -491,6 +494,120 @@ TEST_F(CPDFPageContentGeneratorTest, ProcessTextCharAndWordSpace) {
     EXPECT_FALSE(text_string.Contains(" Tc "));
     EXPECT_FALSE(text_string.Contains(" Tw "));
     EXPECT_TRUE(text_string.Contains(" 10 Tf 0 Tr "));
+  }
+}
+
+TEST_F(CPDFPageContentGeneratorTest, ProcessColorSpaces) {
+  auto doc = std::make_unique<CPDF_TestDocument>();
+  doc->CreateNewDoc();
+
+  RetainPtr<CPDF_Dictionary> pPageDict(doc->CreateNewPage(0));
+
+  // Lab colour space in the page resources, as the parser would leave it:
+  // [/Lab << /WhitePoint [0.9505 1 1.089] /Range [-100 100 -100 100] >>].
+  RetainPtr<CPDF_Array> lab_array = doc->New<CPDF_Array>();
+  lab_array->Append(pdfium::MakeRetain<CPDF_Name>(nullptr, "Lab"));
+  RetainPtr<CPDF_Dictionary> lab_dict = doc->New<CPDF_Dictionary>();
+  RetainPtr<CPDF_Array> white_point = doc->New<CPDF_Array>();
+  white_point->AppendNew<CPDF_Number>(0.9505f);
+  white_point->AppendNew<CPDF_Number>(1.0f);
+  white_point->AppendNew<CPDF_Number>(1.089f);
+  lab_dict->SetFor("WhitePoint", std::move(white_point));
+  RetainPtr<CPDF_Array> range = doc->New<CPDF_Array>();
+  range->AppendNew<CPDF_Number>(-100.0f);
+  range->AppendNew<CPDF_Number>(100.0f);
+  range->AppendNew<CPDF_Number>(-100.0f);
+  range->AppendNew<CPDF_Number>(100.0f);
+  lab_dict->SetFor("Range", std::move(range));
+  lab_array->Append(std::move(lab_dict));
+  const uint32_t lab_obj_num = doc->AddIndirectObject(lab_array);
+
+  RetainPtr<CPDF_Dictionary> resources =
+      pPageDict->SetNewFor<CPDF_Dictionary>("Resources");
+  RetainPtr<CPDF_Dictionary> color_spaces =
+      resources->SetNewFor<CPDF_Dictionary>("ColorSpace");
+  color_spaces->SetNewFor<CPDF_Reference>("CSlab", doc.get(), lab_obj_num);
+
+  auto pTestPage = pdfium::MakeRetain<CPDF_Page>(doc.get(), pPageDict);
+  pTestPage->SetResources(resources);
+  CPDF_PageContentGenerator generator(pTestPage.Get());
+
+  std::set<const CPDF_Object*> visited;
+  RetainPtr<CPDF_ColorSpace> lab =
+      CPDF_ColorSpace::Load(doc.get(), lab_array.Get(), &visited);
+  ASSERT_TRUE(lab);
+
+  // Lab fill reuses its stored resource name; DeviceCMYK stroke is written
+  // with the raw components.
+  {
+    auto pPathObj = std::make_unique<CPDF_PathObject>();
+    pPathObj->set_filltype(CFX_FillRenderOptions::FillType::kWinding);
+    pPathObj->path().AppendRect(10, 5, 13, 30);
+    static const std::vector<float> lab_values = {50.0f, 80.0f, 0.0f};
+    pPathObj->mutable_color_state().SetFillColor(lab, lab_values, "CSlab");
+    static const std::vector<float> cmyk_values = {0.0f, 0.5f, 1.0f, 0.0f};
+    pPathObj->mutable_color_state().SetStrokeColor(
+        CPDF_ColorSpace::GetStockCS(CPDF_ColorSpace::Family::kDeviceCMYK),
+        cmyk_values);
+    fxcrt::ostringstream buf;
+    TestProcessPath(&generator, &buf, pPathObj.get());
+    ByteString path_string(buf);
+    EXPECT_EQ(ByteString("q /CSlab cs 50 80 0 sc 0 .5 1 0 K 10 5 3 25 re f Q\n"),
+              path_string);
+  }
+
+  // DeviceCMYK fill writes k; DeviceGray fill writes g.
+  {
+    auto pPathObj = std::make_unique<CPDF_PathObject>();
+    pPathObj->set_filltype(CFX_FillRenderOptions::FillType::kWinding);
+    pPathObj->path().AppendRect(10, 5, 13, 30);
+    static const std::vector<float> cmyk_values = {0.1f, 0.2f, 0.3f, 0.4f};
+    pPathObj->mutable_color_state().SetFillColor(
+        CPDF_ColorSpace::GetStockCS(CPDF_ColorSpace::Family::kDeviceCMYK),
+        cmyk_values);
+    fxcrt::ostringstream buf;
+    TestProcessPath(&generator, &buf, pPathObj.get());
+    ByteString path_string(buf);
+    EXPECT_EQ(ByteString("q .1 .2 .3 .4 k 10 5 3 25 re f Q\n"), path_string);
+  }
+  {
+    auto pPathObj = std::make_unique<CPDF_PathObject>();
+    pPathObj->set_filltype(CFX_FillRenderOptions::FillType::kWinding);
+    pPathObj->path().AppendRect(10, 5, 13, 30);
+    static const std::vector<float> gray_values = {0.5f};
+    pPathObj->mutable_color_state().SetFillColor(
+        CPDF_ColorSpace::GetStockCS(CPDF_ColorSpace::Family::kDeviceGray),
+        gray_values);
+    fxcrt::ostringstream buf;
+    TestProcessPath(&generator, &buf, pPathObj.get());
+    ByteString path_string(buf);
+    EXPECT_EQ(ByteString("q .5 g 10 5 3 25 re f Q\n"), path_string);
+  }
+
+  // Separation /None is written back faithfully (and leaves no ink), not
+  // dropped: dropping it would paint a black block where the original is
+  // blank. The array is realised under the first free FXC name.
+  {
+    RetainPtr<CPDF_Array> sep_array = doc->New<CPDF_Array>();
+    sep_array->Append(pdfium::MakeRetain<CPDF_Name>(nullptr, "Separation"));
+    sep_array->Append(pdfium::MakeRetain<CPDF_Name>(nullptr, "None"));
+    sep_array->Append(pdfium::MakeRetain<CPDF_Name>(nullptr, "DeviceCMYK"));
+    const uint32_t sep_obj_num = doc->AddIndirectObject(sep_array);
+    (void)sep_obj_num;
+    std::set<const CPDF_Object*> visited_sep;
+    RetainPtr<CPDF_ColorSpace> sep_none =
+        CPDF_ColorSpace::Load(doc.get(), sep_array.Get(), &visited_sep);
+    ASSERT_TRUE(sep_none);
+    auto pPathObj = std::make_unique<CPDF_PathObject>();
+    pPathObj->set_filltype(CFX_FillRenderOptions::FillType::kWinding);
+    pPathObj->path().AppendRect(10, 5, 13, 30);
+    static const std::vector<float> none_values = {1.0f};
+    pPathObj->mutable_color_state().SetFillColor(sep_none, none_values,
+                                                 "CSn");
+    fxcrt::ostringstream buf;
+    TestProcessPath(&generator, &buf, pPathObj.get());
+    ByteString path_string(buf);
+    EXPECT_EQ(ByteString("q /FXC1 cs 1 scn 10 5 3 25 re f Q\n"), path_string);
   }
 }
 

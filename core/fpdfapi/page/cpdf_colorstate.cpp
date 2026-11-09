@@ -104,22 +104,27 @@ void CPDF_ColorState::SetStrokeColor(RetainPtr<CPDF_ColorSpace> colorspace,
 
 void CPDF_ColorState::SetFillPattern(RetainPtr<CPDF_Pattern> pattern,
                                      pdfium::span<float> values,
-                                     ByteString colorspace_name) {
+                                     ByteString colorspace_name,
+                                     ByteString pattern_name) {
   ColorData* data = ref_.GetPrivateCopy();
   data->fill_color_ref_ =
       SetPattern(std::move(pattern), values, data->fill_color_,
-                 &data->fill_color_space_name_);
+                 &data->fill_color_space_name_, &data->fill_pattern_name_);
   data->fill_color_space_name_ = std::move(colorspace_name);
+  data->fill_pattern_name_ = std::move(pattern_name);
 }
 
 void CPDF_ColorState::SetStrokePattern(RetainPtr<CPDF_Pattern> pattern,
                                        pdfium::span<float> values,
-                                       ByteString colorspace_name) {
+                                       ByteString colorspace_name,
+                                       ByteString pattern_name) {
   ColorData* data = ref_.GetPrivateCopy();
   data->stroke_color_ref_ =
       SetPattern(std::move(pattern), values, data->stroke_color_,
-                 &data->stroke_color_space_name_);
+                 &data->stroke_color_space_name_,
+                 &data->stroke_pattern_name_);
   data->stroke_color_space_name_ = std::move(colorspace_name);
+  data->stroke_pattern_name_ = std::move(pattern_name);
 }
 
 ByteString CPDF_ColorState::GetFillColorSpaceName() const {
@@ -138,6 +143,16 @@ void CPDF_ColorState::SetFillColorSpaceName(ByteString name) {
 
 void CPDF_ColorState::SetStrokeColorSpaceName(ByteString name) {
   ref_.GetPrivateCopy()->stroke_color_space_name_ = std::move(name);
+}
+
+ByteString CPDF_ColorState::GetFillPatternName() const {
+  const ColorData* data = ref_.GetObject();
+  return data ? data->fill_pattern_name_ : ByteString();
+}
+
+ByteString CPDF_ColorState::GetStrokePatternName() const {
+  const ColorData* data = ref_.GetObject();
+  return data ? data->stroke_pattern_name_ : ByteString();
 }
 
 std::optional<FX_COLORREF> CPDF_ColorState::SetColor(
@@ -165,8 +180,10 @@ std::optional<FX_COLORREF> CPDF_ColorState::SetColor(
 FX_COLORREF CPDF_ColorState::SetPattern(RetainPtr<CPDF_Pattern> pattern,
                                         pdfium::span<float> values,
                                         CPDF_Color& color,
-                                        ByteString* colorspace_name) {
+                                        ByteString* colorspace_name,
+                                        ByteString* pattern_name) {
   colorspace_name->clear();
+  pattern_name->clear();
   color.SetValueForPattern(pattern, values);
   std::optional<FX_COLORREF> colorref = color.GetColorRef();
   if (colorref.has_value()) {
@@ -185,7 +202,9 @@ CPDF_ColorState::ColorData::ColorData(const ColorData& src)
       fill_color_(src.fill_color_),
       stroke_color_(src.stroke_color_),
       fill_color_space_name_(src.fill_color_space_name_),
-      stroke_color_space_name_(src.stroke_color_space_name_) {}
+      stroke_color_space_name_(src.stroke_color_space_name_),
+      fill_pattern_name_(src.fill_pattern_name_),
+      stroke_pattern_name_(src.stroke_pattern_name_) {}
 
 CPDF_ColorState::ColorData::~ColorData() = default;
 

@@ -14,8 +14,12 @@
 
 #include "core/fxcrt/bytestring.h"
 #include "core/fxcrt/fx_string_wrappers.h"
+#include "core/fxcrt/retain_ptr.h"
+#include "core/fxcrt/span.h"
 #include "core/fxcrt/unowned_ptr.h"
 
+class CPDF_Color;
+class CPDF_ColorSpace;
 class CPDF_ContentMarks;
 class CPDF_Document;
 class CPDF_FormObject;
@@ -25,6 +29,7 @@ class CPDF_PageObject;
 class CPDF_PageObjectHolder;
 class CPDF_Path;
 class CPDF_PathObject;
+class CPDF_Pattern;
 class CPDF_TextObject;
 
 class CPDF_PageContentGenerator {
@@ -49,6 +54,42 @@ class CPDF_PageContentGenerator {
   ByteString GetOrCreateDefaultGraphics() const;
   ByteString RealizeResource(const CPDF_Object* pResource,
                              ByteStringView type) const;
+  // Writes the fill or stroke color of `color` to `buf`, using the color
+  // space the color was set in rather than an equivalent RGB color.
+  // `colorspace_name`/`pattern_name` are the resource names that selected
+  // the color space/pattern, as recorded by the parser. Returns whether
+  // anything was written.
+  bool WriteColorToStream(fxcrt::ostringstream& buf,
+                          const CPDF_Color* color,
+                          ByteString colorspace_name,
+                          ByteString pattern_name,
+                          bool is_fill);
+  // Writes a color in a named color space: `/Name cs`/`CS` followed by the
+  // components and `sc`/`SC` (`use_names` selects `scn`/`SCN` instead, for
+  // the color spaces whose colors need names). Returns false when the color
+  // space cannot be referred to by name.
+  bool WriteNamedColorToStream(fxcrt::ostringstream& buf,
+                               RetainPtr<CPDF_ColorSpace> colorspace,
+                               ByteString stored_name,
+                               pdfium::span<const float> components,
+                               bool use_names,
+                               bool is_fill);
+  // Writes a pattern color: the pattern color space, then the underlying
+  // color for an uncolored tiling pattern, then `/Name scn`/`SCN`.
+  bool WritePatternColorToStream(fxcrt::ostringstream& buf,
+                                 const CPDF_Color* color,
+                                 ByteString colorspace_name,
+                                 ByteString pattern_name,
+                                 bool is_fill);
+  // Returns the name to use for `colorspace` in a `cs`/`CS` operator: the
+  // stored name when it still refers to this color space, a newly realized
+  // name for the color space array otherwise. Empty when the color space
+  // cannot be referred to by name at all.
+  ByteString GetColorSpaceResourceName(RetainPtr<CPDF_ColorSpace> colorspace,
+                                       ByteString stored_name) const;
+  // Returns the name to use for `pattern` in an `scn`/`SCN` operator.
+  ByteString GetPatternResourceName(RetainPtr<CPDF_Pattern> pattern,
+                                    ByteString stored_name) const;
   const CPDF_ContentMarks* ProcessContentMarks(fxcrt::ostringstream* buf,
                                                const CPDF_PageObject* pPageObj,
                                                const CPDF_ContentMarks* pPrev);

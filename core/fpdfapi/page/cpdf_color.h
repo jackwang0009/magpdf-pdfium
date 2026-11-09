@@ -45,6 +45,11 @@ class CPDF_Color {
   // Returns the raw color components, as written by the sc/scn, g, rg or k
   // operators. Returns an empty span for pattern colors.
   pdfium::span<const float> GetComponents() const;
+  // Returns the underlying color components of a pattern color, as written
+  // by the scn operator before the pattern name. Only the first
+  // GetColorSpace()->GetBaseColorSpace()->ComponentCount() entries are
+  // meaningful. Returns an empty span for non-pattern colors.
+  pdfium::span<const float> GetPatternComponents() const;
   // Wrapper around GetRGB() that returns the RGB value as FX_COLORREF. The
   // GetRGB() return value is clamped to fit into FX_COLORREF, where the color
   // components are 8-bit fields within an unsigned integer.

@@ -101,6 +101,13 @@ pdfium::span<const float> CPDF_Color::GetComponents() const {
              : pdfium::span<const float>();
 }
 
+pdfium::span<const float> CPDF_Color::GetPatternComponents() const {
+  if (!std::holds_alternative<std::unique_ptr<PatternValue>>(color_data_)) {
+    return pdfium::span<const float>();
+  }
+  return std::get<std::unique_ptr<PatternValue>>(color_data_)->GetComps();
+}
+
 bool CPDF_Color::IsColorSpaceRGB() const {
   return cs_ ==
          CPDF_ColorSpace::GetStockCS(CPDF_ColorSpace::Family::kDeviceRGB);

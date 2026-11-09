@@ -54,16 +54,24 @@ class CPDF_ColorState {
                       ByteString colorspace_name = ByteString());
   void SetFillPattern(RetainPtr<CPDF_Pattern> pattern,
                       pdfium::span<float> values,
-                      ByteString colorspace_name = ByteString());
+                      ByteString colorspace_name = ByteString(),
+                      ByteString pattern_name = ByteString());
   void SetStrokePattern(RetainPtr<CPDF_Pattern> pattern,
                         pdfium::span<float> values,
-                        ByteString colorspace_name = ByteString());
+                        ByteString colorspace_name = ByteString(),
+                        ByteString pattern_name = ByteString());
   // Returns the name of the color space resource that selected the fill color
   // space, or an empty string if the fill color space did not come from one.
   ByteString GetFillColorSpaceName() const;
   ByteString GetStrokeColorSpaceName() const;
   void SetFillColorSpaceName(ByteString name);
   void SetStrokeColorSpaceName(ByteString name);
+  // Returns the name of the pattern resource that the fill/stroke pattern
+  // was selected from, or an empty string if the pattern did not come from
+  // one. This is the name an `scn` operator has to refer to when writing
+  // the pattern color back out.
+  ByteString GetFillPatternName() const;
+  ByteString GetStrokePatternName() const;
 
   bool HasRef() const { return !!ref_; }
 
@@ -82,6 +90,8 @@ class CPDF_ColorState {
     CPDF_Color stroke_color_;
     ByteString fill_color_space_name_;
     ByteString stroke_color_space_name_;
+    ByteString fill_pattern_name_;
+    ByteString stroke_pattern_name_;
 
    private:
     ColorData();
@@ -96,7 +106,8 @@ class CPDF_ColorState {
   FX_COLORREF SetPattern(RetainPtr<CPDF_Pattern> pattern,
                          pdfium::span<float> values,
                          CPDF_Color& color,
-                         ByteString* color_space_name);
+                         ByteString* color_space_name,
+                         ByteString* pattern_name);
 
   SharedCopyOnWrite<ColorData> ref_;
 };

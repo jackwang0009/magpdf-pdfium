@@ -27,6 +27,10 @@ class CPDF_Pattern : public Retainable, public Observable {
 
   const CFX_Matrix& pattern_to_form() const { return pattern_to_form_; }
 
+  // Returns the pattern dictionary or stream this pattern was loaded from.
+  // A content stream generator uses it to find the pattern resource name.
+  RetainPtr<CPDF_Object> GetPatternObj() const { return pattern_obj_; }
+
  protected:
   CPDF_Pattern(CPDF_Document* doc,
                RetainPtr<CPDF_Object> pObj,

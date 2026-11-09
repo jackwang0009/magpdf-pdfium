@@ -1133,6 +1133,9 @@ ByteString CPDF_StreamContentParser::GetCurrentColorSpaceName(
   }
 
   RetainPtr<CPDF_ColorSpace> cs = color->GetColorSpace();
+  if (!cs) {
+    return ByteString();
+  }
   if (cs->IsSpecial()) {
     return for_fill ? color_state.GetFillColorSpaceName()
                     : color_state.GetStrokeColorSpaceName();
@@ -1146,11 +1149,18 @@ ByteString CPDF_StreamContentParser::GetCurrentColorSpaceName(
     case CPDF_ColorSpace::Family::kDeviceCMYK:
       return "DeviceCMYK";
     case CPDF_ColorSpace::Family::kCalGray:
-      return "CalGray";
     case CPDF_ColorSpace::Family::kCalRGB:
-      return "CalRGB";
     case CPDF_ColorSpace::Family::kLab:
-      return "Lab";
+    case CPDF_ColorSpace::Family::kICCBased:
+      // These color spaces can only be selected by name from the resources
+      // dictionary, so the name that selected them is the one to write back.
+      // The family name itself is not a usable resource name: there is no
+      // /CalGray entry unless the file defines one under that exact name,
+      // which is exactly what the stored name records. Returning the family
+      // name here used to overwrite the stored resource name with e.g.
+      // "CalGray", which no `cs` operator can resolve again.
+      return for_fill ? color_state.GetFillColorSpaceName()
+                      : color_state.GetStrokeColorSpaceName();
     default:
       return ByteString();
   }
@@ -1177,7 +1187,8 @@ void CPDF_StreamContentParser::Handle_SetColorPS_Fill() {
 
   std::vector<float> values = GetNamedColors();
   cur_states_->mutable_color_state().SetFillPattern(
-      std::move(pPattern), values, GetCurrentColorSpaceName(/*for_fill=*/true));
+      std::move(pPattern), values, GetCurrentColorSpaceName(/*for_fill=*/true),
+      GetString(0));
 }
 
 void CPDF_StreamContentParser::Handle_SetColorPS_Stroke() {
@@ -1202,7 +1213,7 @@ void CPDF_StreamContentParser::Handle_SetColorPS_Stroke() {
   std::vector<float> values = GetNamedColors();
   cur_states_->mutable_color_state().SetStrokePattern(
       std::move(pPattern), values,
-      GetCurrentColorSpaceName(/*for_fill=*/false));
+      GetCurrentColorSpaceName(/*for_fill=*/false), GetString(0));
 }
 
 void CPDF_StreamContentParser::Handle_ShadeFill() {
