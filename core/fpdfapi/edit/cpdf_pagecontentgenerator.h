@@ -128,13 +128,37 @@ class CPDF_PageContentGenerator {
   // terminated by the no-op `n` painting operator.
   void WriteClipPath(fxcrt::ostringstream* buf,
                      const CPDF_ClipPath& clip_path);
+  // The graphics state parameters whose operator is only written for a
+  // value other than the initial one, and which have been set inside a `q`
+  // that is still open. Every object is written between a `q` and a `Q` of
+  // its own and starts from the initial values, with one exception: the `q`
+  // of a text clip group stays open while the objects it clips are written,
+  // so whatever the texts of the group set is still set for those objects,
+  // and for the later texts of the group. A parameter that is marked here
+  // is therefore written whatever its value.
+  struct WrittenState {
+    bool line_width = false;
+    bool line_cap = false;
+    bool line_join = false;
+    bool miter_limit = false;
+    bool dash = false;
+    bool flatness = false;
+    bool render_intent = false;
+    bool char_space = false;
+    bool word_space = false;
+    // Alpha or blend mode, by way of a graphics state parameter dictionary
+    // that was not parsed.
+    bool alpha_or_blend_mode = false;
+  };
   // Writes the graphics state of `pPageObj` (ExtGState, color, line width/
   // cap/join/miter limit/dash, flatness, rendering intent, clip path)
   // without the enclosing `q`. ProcessGraphics() is `q` +
-  // WriteGraphicsState().
+  // WriteGraphicsState(). `written` says what the `q`s that are open have
+  // set already, and is updated with what this call sets.
   void WriteGraphicsState(fxcrt::ostringstream* buf,
                           CPDF_PageObject* pPageObj,
-                          bool include_clip_path);
+                          bool include_clip_path,
+                          WrittenState* written);
   // What WriteParsedExtGStates() wrote.
   struct ParsedExtGStates {
     // The resource names of the dictionaries, in the order of the
@@ -164,11 +188,13 @@ class CPDF_PageContentGenerator {
   // the TJ) without the enclosing `BT...ET` or `q...Q`. `force_text_matrix`
   // writes the Tm even when it is the identity matrix: a text that follows
   // another text in the same BT...ET must reset the text position, it cannot
-  // rely on where the previous text ended. Returns false when the font
-  // cannot be written back (Type3); callers check CanWriteText() first.
+  // rely on where the previous text ended. `written` is the same as for
+  // WriteGraphicsState(). Returns false when the font cannot be written back
+  // (Type3); callers check CanWriteText() first.
   bool WriteTextContent(fxcrt::ostringstream* buf,
                         CPDF_TextObject* pTextObj,
-                        bool force_text_matrix);
+                        bool force_text_matrix,
+                        WrittenState* written);
   // Whether the font of `pTextObj` can be written back. Type3 fonts cannot:
   // their glyphs are arbitrary content streams. A missing font falls back
   // to Helvetica, which can be written.
@@ -178,10 +204,12 @@ class CPDF_PageContentGenerator {
   // of `group_sizes` (each group is the texts of one original BT...ET, so
   // their glyphs are unioned within a group and the groups intersect, as
   // the renderer does). The `q` is left open: the caller closes it once no
-  // later object needs the clip anymore.
+  // later object needs the clip anymore. Until then, `written` holds what
+  // the texts set.
   void WriteTextClipGroup(fxcrt::ostringstream* buf,
                           const std::vector<CPDF_TextObject*>& texts,
-                          const std::vector<size_t>& group_sizes);
+                          const std::vector<size_t>& group_sizes,
+                          WrittenState* written);
   const CPDF_ContentMarks* ProcessContentMarks(fxcrt::ostringstream* buf,
                                                const CPDF_PageObject* pPageObj,
                                                const CPDF_ContentMarks* pPrev);
@@ -210,6 +238,9 @@ class CPDF_PageContentGenerator {
   UnownedPtr<CPDF_Document> const document_;
   std::vector<UnownedPtr<CPDF_PageObject>> page_objects_;
   ByteString default_graphics_name_;
+  // What the text clip groups that are open have set. Nothing, outside of
+  // GenerateModifiedStreams().
+  WrittenState written_in_open_clip_groups_;
 };
 
 #endif  // CORE_FPDFAPI_EDIT_CPDF_PAGECONTENTGENERATOR_H_

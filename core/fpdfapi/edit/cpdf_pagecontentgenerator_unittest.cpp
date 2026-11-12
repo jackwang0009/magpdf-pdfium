@@ -31,6 +31,7 @@
 #include "core/fpdfapi/parser/cpdf_parser.h"
 #include "core/fpdfapi/parser/cpdf_reference.h"
 #include "core/fpdfapi/parser/cpdf_stream.h"
+#include "core/fpdfapi/parser/cpdf_stream_acc.h"
 #include "core/fpdfapi/parser/cpdf_string.h"
 #include "core/fpdfapi/parser/cpdf_test_document.h"
 #include "core/fxcrt/data_vector.h"
@@ -66,7 +67,8 @@ class CPDFPageContentGeneratorTest : public TestWithPageModule {
                               fxcrt::ostringstream* buf,
                               const std::vector<CPDF_TextObject*>& texts,
                               const std::vector<size_t>& group_sizes) {
-    pGen->WriteTextClipGroup(buf, texts, group_sizes);
+    CPDF_PageContentGenerator::WrittenState written;
+    pGen->WriteTextClipGroup(buf, texts, group_sizes, &written);
   }
 
   void TestProcessPageObject(CPDF_PageContentGenerator* pGen,
@@ -93,6 +95,21 @@ class CPDFPageContentGeneratorTest : public TestWithPageModule {
     auto page = pdfium::MakeRetain<CPDF_Page>(doc, std::move(page_dict));
     page->ParseContent();
     return page;
+  }
+
+  // Regenerates the content of `page`, which CreateParsedPage() made, and
+  // returns the data of its content stream.
+  ByteString RegenerateContents(CPDF_Page* page) {
+    CPDF_PageContentGenerator generator(page);
+    generator.GenerateContent();
+    RetainPtr<const CPDF_Stream> stream =
+        page->GetDict()->GetStreamFor("Contents");
+    if (!stream) {
+      return ByteString();
+    }
+    auto stream_acc = pdfium::MakeRetain<CPDF_StreamAcc>(std::move(stream));
+    stream_acc->LoadAllDataFiltered();
+    return ByteString(ByteStringView(stream_acc->GetSpan()));
   }
 };
 
@@ -1497,6 +1514,83 @@ TEST_F(CPDFPageContentGeneratorTest, ProcessRenderingIntent) {
   // The default rendering intent is not written, under either name.
   EXPECT_EQ("q 0 g 0 G 0 0 10 10 re f Q\n", generate(3));
   EXPECT_EQ("q 0 g 0 G 0 0 10 10 re f Q\n", generate(4));
+}
+
+TEST_F(CPDFPageContentGeneratorTest, GraphicsStateInTextClipGroup) {
+  auto doc = std::make_unique<CPDF_TestDocument>();
+  doc->CreateNewDoc();
+  auto resources = doc->New<CPDF_Dictionary>();
+  auto font_dict = doc->NewIndirect<CPDF_Dictionary>();
+  font_dict->SetNewFor<CPDF_Name>("Type", "Font");
+  font_dict->SetNewFor<CPDF_Name>("Subtype", "Type1");
+  font_dict->SetNewFor<CPDF_Name>("BaseFont", "Helvetica");
+  resources->SetNewFor<CPDF_Dictionary>("Font")->SetNewFor<CPDF_Reference>(
+      "F1", doc.get(), font_dict->GetObjNum());
+
+  // Two texts that clip a path. The first text sets every parameter that is
+  // only written when it does not have its initial value, the second text
+  // sets them back.
+  RetainPtr<CPDF_Page> page = CreateParsedPage(
+      doc.get(), resources,
+      "q\n"
+      "BT /F1 12 Tf 7 Tr 3 w 1 J 1 j 2 M [2 1] 0 d 0.5 i /Saturation ri "
+      "2 Tc 1 Tw 1 0 0 1 10 20 Tm (A) Tj\n"
+      "1 w 0 J 0 j 10 M [] 0 d 1 i /RelativeColorimetric ri "
+      "0 Tc 0 Tw 1 0 0 1 50 20 Tm (B) Tj ET\n"
+      "0 0 100 100 re f\n"
+      "Q\n"
+      "q 0 0 10 10 re f Q\n");
+  ASSERT_EQ(4u, page->GetPageObjectCount());
+  CPDF_PageObject* first_text = page->GetPageObjectByIndex(0);
+  CPDF_PageObject* second_text = page->GetPageObjectByIndex(1);
+  CPDF_PageObject* clipped_path = page->GetPageObjectByIndex(2);
+  CPDF_PageObject* other_path = page->GetPageObjectByIndex(3);
+  ASSERT_TRUE(first_text->IsText());
+  ASSERT_TRUE(second_text->IsText());
+  ASSERT_TRUE(clipped_path->IsPath());
+
+  // The texts are written inside one `q`, which stays open for the path
+  // they clip. What the first text sets is not taken back by a `Q`, so the
+  // second text and the path write the initial values. The path after the
+  // group starts from the initial values again.
+  first_text->SetDirty(true);
+  EXPECT_EQ(
+      "q\n"
+      "0 0 0 RG 0 0 0 rg 1 w 0 J 0 j\n"
+      "/FXE1 gs q BT 0 g 0 G 3 w 1 J 1 j 2 M [2 1] 0 d .5 i /Saturation ri "
+      "1 0 0 1 10 20 Tm /FXF1 12 Tf 2 Tc 1 Tw 7 Tr [<41>] TJ "
+      "0 g 0 G 1 w 0 J 0 j 10 M [] 0 d 1 i /RelativeColorimetric ri "
+      "1 0 0 1 50 20 Tm /FXF1 12 Tf 0 Tc 0 Tw 7 Tr [<42>] TJ ET\n"
+      "q 0 g 0 G 1 w 0 J 0 j 10 M [] 0 d 1 i /RelativeColorimetric ri "
+      "0 0 100 100 re f Q\n"
+      " Q\n"
+      "q 0 g 0 G 0 0 10 10 re f Q\n"
+      "Q\n",
+      RegenerateContents(page.Get()));
+
+  // The same goes for alpha and blend mode that are set with a dictionary
+  // the generator makes: the default graphics dictionary takes them back.
+  first_text->mutable_general_state().SetFillAlpha(0.5f);
+  first_text->SetDirty(true);
+  EXPECT_EQ(
+      "q\n"
+      "0 0 0 RG 0 0 0 rg 1 w 0 J 0 j\n"
+      "/FXE1 gs q BT 0 g 0 G 3 w 1 J 1 j 2 M [2 1] 0 d .5 i /Saturation ri "
+      "/FXE2 gs 1 0 0 1 10 20 Tm /FXF1 12 Tf 2 Tc 1 Tw 7 Tr [<41>] TJ "
+      "/FXE1 gs 0 g 0 G 1 w 0 J 0 j 10 M [] 0 d 1 i /RelativeColorimetric ri "
+      "1 0 0 1 50 20 Tm /FXF1 12 Tf 0 Tc 0 Tw 7 Tr [<42>] TJ ET\n"
+      "q /FXE1 gs 0 g 0 G 1 w 0 J 0 j 10 M [] 0 d 1 i "
+      "/RelativeColorimetric ri 0 0 100 100 re f Q\n"
+      " Q\n"
+      "q 0 g 0 G 0 0 10 10 re f Q\n"
+      "Q\n",
+      RegenerateContents(page.Get()));
+  using testing::ElementsAre;
+  using testing::IsEmpty;
+  EXPECT_THAT(GraphicsResourceNames(first_text), ElementsAre("FXE2"));
+  EXPECT_THAT(GraphicsResourceNames(second_text), ElementsAre("FXE1"));
+  EXPECT_THAT(GraphicsResourceNames(clipped_path), ElementsAre("FXE1"));
+  EXPECT_THAT(GraphicsResourceNames(other_path), IsEmpty());
 }
 
 TEST_F(CPDFPageContentGeneratorTest, ProcessEmptyForm) {
