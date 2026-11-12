@@ -6,6 +6,7 @@
 
 #include "core/fpdfapi/edit/cpdf_pagecontentgenerator.h"
 
+#include <algorithm>
 #include <array>
 #include <map>
 #include <memory>
@@ -71,10 +72,46 @@ constexpr const char* kResourceKeys[] = {"ExtGState", "Font", "XObject"};
 // Value: The resource names of a given type.
 using ResourcesMap = std::map<ByteString, std::set<ByteString>>;
 
+// The initial values of the graphics state parameters that are only written
+// when they have another value.
+constexpr float kDefaultMiterLimit = 10.0f;
+constexpr float kDefaultFlatness = 1.0f;
 
 // Balances the "q" operator ProcessGraphics() emitted.
 void EndProcessGraphics(fxcrt::ostringstream& buf) {
   buf << " Q\n";
+}
+
+// A soft mask is laid out in the coordinate system that was current when the
+// graphics state parameter dictionary that sets it was applied, and the
+// object remembers that matrix. Objects are written with the identity matrix
+// as the current one, so the remembered matrix has to be made current for
+// that dictionary, with "cm" operators around its "gs" operator.
+//
+// Returns the index of that dictionary among the ones recorded for
+// `page_object`, if there is one and the matrix is not the identity matrix.
+// A matrix that cannot be inverted is of no use: the current matrix could
+// not be restored after it.
+std::optional<size_t> FindSoftMaskDictThatNeedsMatrix(
+    const CPDF_PageObject* page_object) {
+  const CPDF_GeneralState& general_state = page_object->general_state();
+  RetainPtr<const CPDF_Dictionary> soft_mask = general_state.GetSoftMask();
+  if (!soft_mask) {
+    return std::nullopt;
+  }
+  const CFX_Matrix* matrix = general_state.GetSMaskMatrix();
+  if (!matrix || matrix->IsIdentity() ||
+      matrix->a * matrix->d == matrix->b * matrix->c) {
+    return std::nullopt;
+  }
+  pdfium::span<const RetainPtr<CPDF_Dictionary>> dicts =
+      general_state.GetGraphicsResourceDicts();
+  for (size_t i = dicts.size(); i-- > 0;) {
+    if (dicts[i]->GetDirectObjectFor("SMask").Get() == soft_mask.Get()) {
+      return i;
+    }
+  }
+  return std::nullopt;
 }
 
 void RecordPageObjectResourceUsage(const CPDF_PageObject* page_object,
@@ -806,7 +843,10 @@ CPDF_PageContentGenerator::GenerateModifiedStreams() {
                                                       run.end());
         bool usable = true;
         for (CPDF_TextObject* text : candidate_texts) {
-          if (!CanWriteText(text)) {
+          // The graphics state of a grouped text is written between BT and
+          // ET, where "cm" is not allowed.
+          if (!CanWriteText(text) ||
+              FindSoftMaskDictThatNeedsMatrix(text).has_value()) {
             usable = false;
             break;
           }
@@ -1365,24 +1405,31 @@ ByteString CPDF_PageContentGenerator::GetShadingResourceName(
     return ByteString();
   }
 
-  ByteString name = FindResourceName("Shading", shading.Get(),
-                                     pShadingObj->GetResourceName());
+  return GetResourceName("Shading", std::move(shading),
+                         pShadingObj->GetResourceName());
+}
+
+ByteString CPDF_PageContentGenerator::GetResourceName(
+    ByteStringView type,
+    RetainPtr<CPDF_Object> object,
+    const ByteString& preferred_name) const {
+  ByteString name = FindResourceName(type, object.Get(), preferred_name);
   if (!name.IsEmpty()) {
     return name;
   }
 
-  // The shading is not in the resources of this page (anymore), which
-  // happens when the object moved here from another page. Add it.
+  // The object is not in the resources of this page or form (anymore),
+  // which happens when the page object moved here from another page. Add it.
   if (!document_) {
     return ByteString();
   }
-  if (!shading->GetObjNum()) {
-    // A shading dictionary that is a direct object of another resources
-    // dictionary cannot be referenced from here. Make it an indirect object;
-    // the dictionary that holds it writes a reference from then on.
-    document_->AddIndirectObject(shading);
+  if (!object->GetObjNum()) {
+    // An object that is a direct object of another resources dictionary
+    // cannot be referenced from here. Make it an indirect object; the
+    // dictionary that holds it writes a reference from then on.
+    document_->AddIndirectObject(object);
   }
-  return RealizeResource(shading.Get(), "Shading");
+  return RealizeResource(object.Get(), type);
 }
 
 ByteString CPDF_PageContentGenerator::FindResourceName(
@@ -1392,13 +1439,31 @@ ByteString CPDF_PageContentGenerator::FindResourceName(
   RetainPtr<const CPDF_Dictionary> resources = obj_holder_->GetResources();
   RetainPtr<const CPDF_Dictionary> resources_of_type =
       resources ? resources->GetDictFor(type) : nullptr;
+  if (!preferred_name.IsEmpty()) {
+    if (resources_of_type &&
+        resources_of_type->KeyExist(preferred_name.AsStringView())) {
+      if (resources_of_type->GetDirectObjectFor(
+              preferred_name.AsStringView()) == object) {
+        return preferred_name;
+      }
+    } else {
+      // A resource that was removed because nothing used it anymore is put
+      // back under its name by UpdateResourcesDict() once it is in use
+      // again.
+      const auto& all_removed_resources_map =
+          obj_holder_->all_removed_resources_map();
+      auto it = all_removed_resources_map.find(type);
+      if (it != all_removed_resources_map.end()) {
+        auto removed_it = it->second.find(preferred_name);
+        if (removed_it != it->second.end() && removed_it->second &&
+            removed_it->second->GetDirect() == object) {
+          return preferred_name;
+        }
+      }
+    }
+  }
   if (!resources_of_type) {
     return ByteString();
-  }
-  if (!preferred_name.IsEmpty() &&
-      resources_of_type->GetDirectObjectFor(preferred_name.AsStringView()) ==
-          object) {
-    return preferred_name;
   }
   for (const ByteString& key : resources_of_type->GetKeys()) {
     if (resources_of_type->GetDirectObjectFor(key.AsStringView()) == object) {
@@ -1774,6 +1839,12 @@ void CPDF_PageContentGenerator::WriteClipPath(fxcrt::ostringstream* buf,
 void CPDF_PageContentGenerator::WriteGraphicsState(fxcrt::ostringstream* buf,
                                                    CPDF_PageObject* pPageObj,
                                                    bool include_clip_path) {
+  // The graphics state parameter dictionaries the object was parsed with go
+  // first. They are the only way to set the soft mask, the overprint
+  // parameters and the like, and they may set the line parameters as well,
+  // for which the operators below must have the last word.
+  ParsedExtGStates parsed = WriteParsedExtGStates(buf, pPageObj);
+
   const CPDF_ColorState& color_state = pPageObj->color_state();
   WriteColorToStream(*buf, color_state.GetFillColor(),
                      color_state.GetFillColorSpaceName(),
@@ -1781,19 +1852,25 @@ void CPDF_PageContentGenerator::WriteGraphicsState(fxcrt::ostringstream* buf,
   WriteColorToStream(*buf, color_state.GetStrokeColor(),
                      color_state.GetStrokeColorSpaceName(),
                      color_state.GetStrokePatternName(), /*is_fill=*/false);
-  float line_width = pPageObj->graph_state().GetLineWidth();
-  if (line_width != 1.0f) {
+  const CFX_GraphState& graph_state = pPageObj->graph_state();
+  float line_width = graph_state.GetLineWidth();
+  if (line_width != 1.0f || parsed.sets_line_width) {
     WriteFloat(*buf, line_width) << " w ";
   }
-  CFX_GraphStateData::LineCap lineCap = pPageObj->graph_state().GetLineCap();
-  if (lineCap != CFX_GraphStateData::LineCap::kButt) {
+  CFX_GraphStateData::LineCap lineCap = graph_state.GetLineCap();
+  if (lineCap != CFX_GraphStateData::LineCap::kButt || parsed.sets_line_cap) {
     *buf << static_cast<int>(lineCap) << " J ";
   }
-  CFX_GraphStateData::LineJoin lineJoin = pPageObj->graph_state().GetLineJoin();
-  if (lineJoin != CFX_GraphStateData::LineJoin::kMiter) {
+  CFX_GraphStateData::LineJoin lineJoin = graph_state.GetLineJoin();
+  if (lineJoin != CFX_GraphStateData::LineJoin::kMiter ||
+      parsed.sets_line_join) {
     *buf << static_cast<int>(lineJoin) << " j ";
   }
-  std::vector<float> dash_array = pPageObj->graph_state().GetLineDashArray();
+  float miter_limit = graph_state.GetMiterLimit();
+  if (miter_limit != kDefaultMiterLimit || parsed.sets_miter_limit) {
+    WriteFloat(*buf, miter_limit) << " M ";
+  }
+  std::vector<float> dash_array = graph_state.GetLineDashArray();
   if (dash_array.size()) {
     *buf << "[";
     for (size_t i = 0; i < dash_array.size(); ++i) {
@@ -1803,46 +1880,150 @@ void CPDF_PageContentGenerator::WriteGraphicsState(fxcrt::ostringstream* buf,
       WriteFloat(*buf, dash_array[i]);
     }
     *buf << "] ";
-    WriteFloat(*buf, pPageObj->graph_state().GetLineDashPhase()) << " d ";
+    WriteFloat(*buf, graph_state.GetLineDashPhase()) << " d ";
+  } else if (parsed.sets_dash) {
+    *buf << "[] 0 d ";
+  }
+  const CPDF_GeneralState& general_state = pPageObj->general_state();
+  float flatness = general_state.GetFlatness();
+  if (flatness != kDefaultFlatness || parsed.sets_flatness) {
+    WriteFloat(*buf, flatness) << " i ";
   }
 
   if (include_clip_path) {
     WriteClipPath(buf, pPageObj->clip_path());
   }
 
+  // Alpha and blend mode can be changed after parsing. When they are not
+  // what the parsed dictionaries leave them at, set them with dictionaries
+  // made for the purpose: the default graphics dictionary sets all three
+  // parameters, and the dictionary that follows it the ones that are not
+  // at their default value.
   GraphicsData graphD;
-  graphD.fillAlpha = pPageObj->general_state().GetFillAlpha();
-  graphD.strokeAlpha = pPageObj->general_state().GetStrokeAlpha();
-  graphD.blendType = pPageObj->general_state().GetBlendType();
-  if (graphD.fillAlpha == 1.0f && graphD.strokeAlpha == 1.0f &&
-      graphD.blendType == BlendMode::kNormal) {
-    return;
+  graphD.fillAlpha = general_state.GetFillAlpha();
+  graphD.strokeAlpha = general_state.GetStrokeAlpha();
+  graphD.blendType = general_state.GetBlendType();
+  if (graphD.fillAlpha != parsed.fill_alpha ||
+      graphD.strokeAlpha != parsed.stroke_alpha ||
+      graphD.blendType != parsed.blend_type) {
+    if (parsed.fill_alpha != 1.0f || parsed.stroke_alpha != 1.0f ||
+        parsed.blend_type != BlendMode::kNormal) {
+      ByteString default_name = GetOrCreateDefaultGraphics();
+      *buf << "/" << PDF_NameEncode(default_name) << " gs ";
+      parsed.names.push_back(std::move(default_name));
+    }
+    if (graphD.fillAlpha != 1.0f || graphD.strokeAlpha != 1.0f ||
+        graphD.blendType != BlendMode::kNormal) {
+      ByteString name;
+      std::optional<ByteString> maybe_name =
+          obj_holder_->GraphicsMapSearch(graphD);
+      if (maybe_name.has_value()) {
+        name = std::move(maybe_name.value());
+      } else {
+        auto gsDict = document_->New<CPDF_Dictionary>();
+        if (graphD.fillAlpha != 1.0f) {
+          gsDict->SetNewFor<CPDF_Number>("ca", graphD.fillAlpha);
+        }
+
+        if (graphD.strokeAlpha != 1.0f) {
+          gsDict->SetNewFor<CPDF_Number>("CA", graphD.strokeAlpha);
+        }
+
+        if (graphD.blendType != BlendMode::kNormal) {
+          gsDict->SetNewFor<CPDF_Name>("BM", general_state.GetBlendMode());
+        }
+        document_->AddIndirectObject(gsDict);
+        name = RealizeResource(std::move(gsDict), "ExtGState");
+        obj_holder_->GraphicsMapInsert(graphD, name);
+      }
+      *buf << "/" << PDF_NameEncode(name) << " gs ";
+      parsed.names.push_back(std::move(name));
+    }
   }
 
-  ByteString name;
-  std::optional<ByteString> maybe_name = obj_holder_->GraphicsMapSearch(graphD);
-  if (maybe_name.has_value()) {
-    name = std::move(maybe_name.value());
-  } else {
-    auto gsDict = document_->New<CPDF_Dictionary>();
-    if (graphD.fillAlpha != 1.0f) {
-      gsDict->SetNewFor<CPDF_Number>("ca", graphD.fillAlpha);
-    }
-
-    if (graphD.strokeAlpha != 1.0f) {
-      gsDict->SetNewFor<CPDF_Number>("CA", graphD.strokeAlpha);
-    }
-
-    if (graphD.blendType != BlendMode::kNormal) {
-      gsDict->SetNewFor<CPDF_Name>("BM",
-                                   pPageObj->general_state().GetBlendMode());
-    }
-    document_->AddIndirectObject(gsDict);
-    name = RealizeResource(std::move(gsDict), "ExtGState");
-    pPageObj->mutable_general_state().SetGraphicsResourceNames({name});
-    obj_holder_->GraphicsMapInsert(graphD, name);
+  // Remember the names that were written: the resources they refer to are
+  // in use. Most objects were written with the names they already had, and
+  // share their state with other objects, so only touch the state when the
+  // names changed.
+  pdfium::span<const ByteString> stored_names =
+      general_state.GetGraphicsResourceNames();
+  if (!std::equal(parsed.names.begin(), parsed.names.end(),
+                  stored_names.begin(), stored_names.end())) {
+    pdfium::span<const RetainPtr<CPDF_Dictionary>> dicts =
+        general_state.GetGraphicsResourceDicts();
+    std::vector<RetainPtr<CPDF_Dictionary>> dicts_copy(dicts.begin(),
+                                                       dicts.end());
+    pPageObj->mutable_general_state().SetGraphicsResources(
+        std::move(parsed.names), std::move(dicts_copy));
   }
-  *buf << "/" << PDF_NameEncode(name) << " gs ";
+}
+
+CPDF_PageContentGenerator::ParsedExtGStates
+CPDF_PageContentGenerator::WriteParsedExtGStates(
+    fxcrt::ostringstream* buf,
+    const CPDF_PageObject* pPageObj) const {
+  ParsedExtGStates result;
+  const CPDF_GeneralState& general_state = pPageObj->general_state();
+  pdfium::span<const RetainPtr<CPDF_Dictionary>> dicts =
+      general_state.GetGraphicsResourceDicts();
+  if (dicts.empty()) {
+    return result;
+  }
+  pdfium::span<const ByteString> stored_names =
+      general_state.GetGraphicsResourceNames();
+  CHECK_GE(stored_names.size(), dicts.size());
+
+  // The dictionary that sets the soft mask may need the matrix that was
+  // current when it was applied to be the current one again.
+  const std::optional<size_t> soft_mask_index =
+      FindSoftMaskDictThatNeedsMatrix(pPageObj);
+  CFX_Matrix soft_mask_matrix;
+  if (soft_mask_index.has_value()) {
+    soft_mask_matrix = *general_state.GetSMaskMatrix();
+  }
+
+  // Follows what the dictionaries do to the parameters that can be changed
+  // after parsing, the same way CPDF_AllStates::ProcessExtGS() does.
+  CPDF_GeneralState applied;
+  for (size_t i = 0; i < dicts.size(); ++i) {
+    const RetainPtr<CPDF_Dictionary>& dict = dicts[i];
+    ByteString name = GetResourceName("ExtGState", dict, stored_names[i]);
+    if (name.IsEmpty()) {
+      // Keep the names lined up with the dictionaries.
+      result.names.push_back(stored_names[i]);
+      continue;
+    }
+    if (i == soft_mask_index) {
+      WriteMatrix(*buf, soft_mask_matrix) << " cm ";
+    }
+    *buf << "/" << PDF_NameEncode(name) << " gs ";
+    if (i == soft_mask_index) {
+      WriteMatrix(*buf, soft_mask_matrix.GetInverse()) << " cm ";
+    }
+    result.names.push_back(std::move(name));
+
+    if (RetainPtr<const CPDF_Object> alpha = dict->GetDirectObjectFor("ca")) {
+      applied.SetFillAlpha(std::clamp(alpha->GetNumber(), 0.0f, 1.0f));
+    }
+    if (RetainPtr<const CPDF_Object> alpha = dict->GetDirectObjectFor("CA")) {
+      applied.SetStrokeAlpha(std::clamp(alpha->GetNumber(), 0.0f, 1.0f));
+    }
+    if (RetainPtr<const CPDF_Object> mode = dict->GetDirectObjectFor("BM")) {
+      const CPDF_Array* array = mode->AsArray();
+      applied.SetBlendMode(array ? array->GetByteStringAt(0)
+                                 : mode->GetString());
+    }
+    result.sets_line_width |= dict->KeyExist("LW");
+    result.sets_line_cap |= dict->KeyExist("LC");
+    result.sets_line_join |= dict->KeyExist("LJ");
+    result.sets_miter_limit |= dict->KeyExist("ML");
+    result.sets_dash |= dict->KeyExist("D");
+    result.sets_flatness |= dict->KeyExist("FL");
+  }
+  result.fill_alpha = applied.GetFillAlpha();
+  result.stroke_alpha = applied.GetStrokeAlpha();
+  result.blend_type = applied.GetBlendType();
+  return result;
 }
 
 void CPDF_PageContentGenerator::ProcessDefaultGraphics(

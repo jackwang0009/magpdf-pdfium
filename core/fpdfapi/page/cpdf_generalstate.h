@@ -70,6 +70,7 @@ class CPDF_GeneralState {
   void SetUCR(RetainPtr<const CPDF_Object> pObject);
   void SetHT(RetainPtr<const CPDF_Object> pObject);
 
+  float GetFlatness() const;
   void SetFlatness(float flatness);
   void SetSmoothness(float smoothness);
 
@@ -79,9 +80,21 @@ class CPDF_GeneralState {
   void SetAlphaSource(bool source);
   void SetTextKnockout(bool knockout);
 
-  void SetGraphicsResourceNames(std::vector<ByteString> names);
-  void AppendGraphicsResourceName(ByteString name);
+  // Records that the graphics state parameter dictionary `dict`, which is
+  // the ExtGState resource `name`, was applied to this state. Applying the
+  // recorded dictionaries in order to the initial graphics state gives this
+  // state again, so a dictionary is dropped once later ones give every
+  // parameter it sets a new value.
+  void AppendGraphicsResource(ByteString name, RetainPtr<CPDF_Dictionary> dict);
+
+  // Sets the names of the ExtGState resources that apply to this state:
+  // one for each of `dicts`, in the same order, followed by the names of
+  // the resources that are not recorded as dictionaries.
+  void SetGraphicsResources(std::vector<ByteString> names,
+                            std::vector<RetainPtr<CPDF_Dictionary>> dicts);
   pdfium::span<const ByteString> GetGraphicsResourceNames() const;
+  pdfium::span<const RetainPtr<CPDF_Dictionary>> GetGraphicsResourceDicts()
+      const;
 
  private:
   class StateData final : public Retainable {
@@ -112,6 +125,8 @@ class CPDF_GeneralState {
     float smoothness_ = 0.0f;
     // The resource names of the graphics states that apply to this object.
     std::vector<ByteString> graphics_resource_names_;
+    // The dictionaries of the first entries of `graphics_resource_names_`.
+    std::vector<RetainPtr<CPDF_Dictionary>> graphics_resource_dicts_;
 
    private:
     StateData();

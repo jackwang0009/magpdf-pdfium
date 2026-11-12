@@ -17,6 +17,7 @@
 #include "core/fxcrt/retain_ptr.h"
 #include "core/fxcrt/span.h"
 #include "core/fxcrt/unowned_ptr.h"
+#include "core/fxge/dib/fx_dib.h"
 
 class CPDF_ClipPath;
 class CPDF_Color;
@@ -76,6 +77,11 @@ class CPDF_PageContentGenerator {
   ByteString FindResourceName(ByteStringView type,
                               const CPDF_Object* object,
                               const ByteString& preferred_name) const;
+  // Same as FindResourceName(), but adds `object` to the resources under a
+  // new name when it is not there.
+  ByteString GetResourceName(ByteStringView type,
+                             RetainPtr<CPDF_Object> object,
+                             const ByteString& preferred_name) const;
   void ProcessGraphics(fxcrt::ostringstream* buf, CPDF_PageObject* pPageObj);
   void ProcessDefaultGraphics(fxcrt::ostringstream* buf);
   void ProcessText(fxcrt::ostringstream* buf, CPDF_TextObject* pTextObj);
@@ -122,12 +128,35 @@ class CPDF_PageContentGenerator {
   // terminated by the no-op `n` painting operator.
   void WriteClipPath(fxcrt::ostringstream* buf,
                      const CPDF_ClipPath& clip_path);
-  // Writes the graphics state of `pPageObj` (color, line width/cap/join/
-  // dash, clip path, ExtGState) without the enclosing `q`. ProcessGraphics()
-  // is `q` + WriteGraphicsState().
+  // Writes the graphics state of `pPageObj` (ExtGState, color, line width/
+  // cap/join/miter limit/dash, flatness, clip path) without the enclosing
+  // `q`. ProcessGraphics() is `q` + WriteGraphicsState().
   void WriteGraphicsState(fxcrt::ostringstream* buf,
                           CPDF_PageObject* pPageObj,
                           bool include_clip_path);
+  // What WriteParsedExtGStates() wrote.
+  struct ParsedExtGStates {
+    // The resource names of the dictionaries, in the order of the
+    // dictionaries.
+    std::vector<ByteString> names;
+    // The values the dictionaries leave alpha and blend mode at.
+    float fill_alpha = 1.0f;
+    float stroke_alpha = 1.0f;
+    BlendMode blend_type = BlendMode::kNormal;
+    // Whether one of the dictionaries sets a parameter that also has an
+    // operator of its own.
+    bool sets_line_width = false;
+    bool sets_line_cap = false;
+    bool sets_line_join = false;
+    bool sets_miter_limit = false;
+    bool sets_dash = false;
+    bool sets_flatness = false;
+  };
+  // Writes a `gs` operator for each graphics state parameter dictionary
+  // `pPageObj` was parsed with, so that every entry of those dictionaries
+  // applies to the object again.
+  ParsedExtGStates WriteParsedExtGStates(fxcrt::ostringstream* buf,
+                                         const CPDF_PageObject* pPageObj) const;
   // Writes the text content of `pTextObj` (text matrix, font, Tc/Tw/Tr and
   // the TJ) without the enclosing `BT...ET` or `q...Q`. `force_text_matrix`
   // writes the Tm even when it is the identity matrix: a text that follows

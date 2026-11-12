@@ -6,11 +6,16 @@
 
 #include "core/fpdfapi/page/cpdf_generalstate.h"
 
+#include <set>
 #include <utility>
 
 #include "core/fpdfapi/page/cpdf_transferfunc.h"
+#include "core/fpdfapi/parser/cpdf_array.h"
 #include "core/fpdfapi/parser/cpdf_dictionary.h"
 #include "core/fpdfapi/parser/cpdf_object.h"
+#include "core/fxcrt/check.h"
+#include "core/fxcrt/check_op.h"
+#include "core/fxcrt/containers/contains.h"
 
 namespace {
 
@@ -70,6 +75,43 @@ BlendMode GetBlendTypeInternal(const ByteString& mode) {
       return BlendMode::kLuminosity;
   }
   return BlendMode::kNormal;
+}
+
+// Adds the keys of the graphics state parameter dictionary `dict` that give
+// a parameter a new value when the dictionary is applied. These are the
+// entries CPDF_AllStates::ProcessExtGS() does not skip, and the entries it
+// does not know, which other PDF consumers may.
+void AddKeysThatTakeEffect(const CPDF_Dictionary* dict,
+                           std::set<ByteString>* keys) {
+  CPDF_DictionaryLocker locker(dict);
+  for (const auto& it : locker) {
+    RetainPtr<const CPDF_Object> value = it.second->GetDirect();
+    if (!value) {
+      continue;
+    }
+    if (it.first == "D") {
+      const CPDF_Array* dash = value->AsArray();
+      if (!dash || !dash->GetArrayAt(0)) {
+        continue;
+      }
+    } else if (it.first == "Font" && !value->IsArray()) {
+      continue;
+    }
+    keys->insert(it.first);
+  }
+}
+
+// Whether every entry of the graphics state parameter dictionary `dict` that
+// stands for a parameter has its key in `keys`.
+bool HasOnlyKeysFrom(const CPDF_Dictionary* dict,
+                     const std::set<ByteString>& keys) {
+  CPDF_DictionaryLocker locker(dict);
+  for (const auto& it : locker) {
+    if (it.first != "Type" && !pdfium::Contains(keys, it.first)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 }  // namespace
@@ -240,6 +282,11 @@ void CPDF_GeneralState::SetHT(RetainPtr<const CPDF_Object> pObject) {
   ref_.GetPrivateCopy()->ht_ = std::move(pObject);
 }
 
+float CPDF_GeneralState::GetFlatness() const {
+  const StateData* pData = ref_.GetObject();
+  return pData ? pData->flatness_ : 1.0f;
+}
+
 void CPDF_GeneralState::SetFlatness(float flatness) {
   ref_.GetPrivateCopy()->flatness_ = flatness;
 }
@@ -265,13 +312,42 @@ void CPDF_GeneralState::SetTextKnockout(bool knockout) {
   ref_.GetPrivateCopy()->text_knockout_ = knockout;
 }
 
-void CPDF_GeneralState::SetGraphicsResourceNames(
-    std::vector<ByteString> names) {
-  ref_.GetPrivateCopy()->graphics_resource_names_ = std::move(names);
+void CPDF_GeneralState::AppendGraphicsResource(
+    ByteString name,
+    RetainPtr<CPDF_Dictionary> dict) {
+  CHECK(dict);
+  StateData* data = ref_.GetPrivateCopy();
+  std::vector<ByteString>& names = data->graphics_resource_names_;
+  std::vector<RetainPtr<CPDF_Dictionary>>& dicts =
+      data->graphics_resource_dicts_;
+  // Only names that have a dictionary can be weighed against `dict`.
+  names.resize(dicts.size());
+
+  // Walk back through the dictionaries applied so far. One whose keys are
+  // all set again by the dictionaries after it has no effect on this state
+  // anymore. This keeps the list no longer than the number of different
+  // keys, however many `gs` operators a content stream has.
+  std::set<ByteString> keys_set_later;
+  AddKeysThatTakeEffect(dict.Get(), &keys_set_later);
+  for (size_t i = dicts.size(); i-- > 0;) {
+    if (HasOnlyKeysFrom(dicts[i].Get(), keys_set_later)) {
+      names.erase(names.begin() + i);
+      dicts.erase(dicts.begin() + i);
+    } else {
+      AddKeysThatTakeEffect(dicts[i].Get(), &keys_set_later);
+    }
+  }
+  names.push_back(std::move(name));
+  dicts.push_back(std::move(dict));
 }
 
-void CPDF_GeneralState::AppendGraphicsResourceName(ByteString name) {
-  ref_.GetPrivateCopy()->graphics_resource_names_.push_back(std::move(name));
+void CPDF_GeneralState::SetGraphicsResources(
+    std::vector<ByteString> names,
+    std::vector<RetainPtr<CPDF_Dictionary>> dicts) {
+  CHECK_GE(names.size(), dicts.size());
+  StateData* data = ref_.GetPrivateCopy();
+  data->graphics_resource_names_ = std::move(names);
+  data->graphics_resource_dicts_ = std::move(dicts);
 }
 
 pdfium::span<const ByteString> CPDF_GeneralState::GetGraphicsResourceNames()
@@ -281,6 +357,15 @@ pdfium::span<const ByteString> CPDF_GeneralState::GetGraphicsResourceNames()
     return {};
   }
   return data->graphics_resource_names_;
+}
+
+pdfium::span<const RetainPtr<CPDF_Dictionary>>
+CPDF_GeneralState::GetGraphicsResourceDicts() const {
+  const StateData* data = ref_.GetObject();
+  if (!data) {
+    return {};
+  }
+  return data->graphics_resource_dicts_;
 }
 
 CPDF_GeneralState::StateData::StateData() = default;
@@ -305,7 +390,9 @@ CPDF_GeneralState::StateData::StateData(const StateData& that)
       ucr_(that.ucr_),
       ht_(that.ht_),
       flatness_(that.flatness_),
-      smoothness_(that.smoothness_) {}
+      smoothness_(that.smoothness_),
+      graphics_resource_names_(that.graphics_resource_names_),
+      graphics_resource_dicts_(that.graphics_resource_dicts_) {}
 
 CPDF_GeneralState::StateData::~StateData() = default;
 

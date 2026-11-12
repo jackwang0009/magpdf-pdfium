@@ -8,11 +8,13 @@
 #include <memory>
 #include <set>
 #include <utility>
+#include <vector>
 
 #include "core/fpdfapi/font/cpdf_font.h"
 #include "core/fpdfapi/page/cpdf_colorspace.h"
 #include "core/fpdfapi/page/cpdf_docpagedata.h"
 #include "core/fpdfapi/page/cpdf_form.h"
+#include "core/fpdfapi/page/cpdf_formobject.h"
 #include "core/fpdfapi/page/cpdf_image.h"
 #include "core/fpdfapi/page/cpdf_imageobject.h"
 #include "core/fpdfapi/page/cpdf_page.h"
@@ -21,6 +23,7 @@
 #include "core/fpdfapi/page/cpdf_textstate.h"
 #include "core/fpdfapi/page/test_with_page_module.h"
 #include "core/fpdfapi/parser/cpdf_array.h"
+#include "core/fpdfapi/parser/cpdf_boolean.h"
 #include "core/fpdfapi/parser/cpdf_dictionary.h"
 #include "core/fpdfapi/parser/cpdf_document.h"
 #include "core/fpdfapi/parser/cpdf_name.h"
@@ -33,6 +36,7 @@
 #include "core/fxcrt/data_vector.h"
 #include "core/fxge/cfx_fillrenderoptions.h"
 #include "core/fxge/dib/cfx_dibitmap.h"
+#include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 class CPDFPageContentGeneratorTest : public TestWithPageModule {
@@ -1026,6 +1030,436 @@ TEST_F(CPDFPageContentGeneratorTest, ProcessShadingOnAnotherPage) {
     EXPECT_EQ(kExpected, ByteString(buf));
   }
   EXPECT_EQ(1u, other_shadings->size());
+}
+
+namespace {
+
+// Adds the graphics state parameter dictionaries the ExtGState tests use to
+// `resources`. /GSm, the one with the soft mask, is an indirect object; the
+// others are direct objects of the resources dictionary.
+void AddExtGStates(CPDF_TestDocument* doc, CPDF_Dictionary* resources) {
+  auto ext_gstates = resources->SetNewFor<CPDF_Dictionary>("ExtGState");
+
+  auto group_dict = doc->New<CPDF_Dictionary>();
+  group_dict->SetNewFor<CPDF_Name>("Type", "XObject");
+  group_dict->SetNewFor<CPDF_Name>("Subtype", "Form");
+  auto bbox = group_dict->SetNewFor<CPDF_Array>("BBox");
+  for (int value : {0, 0, 100, 100}) {
+    bbox->AppendNew<CPDF_Number>(value);
+  }
+  auto group = group_dict->SetNewFor<CPDF_Dictionary>("Group");
+  group->SetNewFor<CPDF_Name>("S", "Transparency");
+  group->SetNewFor<CPDF_Name>("CS", "DeviceGray");
+  static constexpr char kGroupContents[] = "0.5 g 0 0 100 100 re f";
+  auto group_stream = doc->NewIndirect<CPDF_Stream>(
+      DataVector<uint8_t>(std::begin(kGroupContents),
+                          std::end(kGroupContents) - 1),
+      std::move(group_dict));
+
+  auto soft_mask_gs = doc->NewIndirect<CPDF_Dictionary>();
+  auto soft_mask = soft_mask_gs->SetNewFor<CPDF_Dictionary>("SMask");
+  soft_mask->SetNewFor<CPDF_Name>("S", "Luminosity");
+  soft_mask->SetNewFor<CPDF_Reference>("G", doc, group_stream->GetObjNum());
+  soft_mask_gs->SetNewFor<CPDF_Number>("ca", 0.5f);
+  ext_gstates->SetNewFor<CPDF_Reference>("GSm", doc, soft_mask_gs->GetObjNum());
+
+  auto no_soft_mask_gs = ext_gstates->SetNewFor<CPDF_Dictionary>("GSnone");
+  no_soft_mask_gs->SetNewFor<CPDF_Name>("SMask", "None");
+
+  auto overprint_gs = ext_gstates->SetNewFor<CPDF_Dictionary>("GSop");
+  overprint_gs->SetNewFor<CPDF_Boolean>("OP", true);
+  overprint_gs->SetNewFor<CPDF_Boolean>("op", true);
+  overprint_gs->SetNewFor<CPDF_Number>("OPM", 1);
+
+  auto knockout_gs = ext_gstates->SetNewFor<CPDF_Dictionary>("GStk");
+  knockout_gs->SetNewFor<CPDF_Boolean>("TK", false);
+  knockout_gs->SetNewFor<CPDF_Boolean>("SA", true);
+
+  auto line_gs = ext_gstates->SetNewFor<CPDF_Dictionary>("GSln");
+  line_gs->SetNewFor<CPDF_Number>("LW", 6);
+  line_gs->SetNewFor<CPDF_Number>("LC", 1);
+  line_gs->SetNewFor<CPDF_Number>("LJ", 1);
+  line_gs->SetNewFor<CPDF_Number>("ML", 2);
+  auto dash = line_gs->SetNewFor<CPDF_Array>("D");
+  auto dash_array = dash->AppendNew<CPDF_Array>();
+  dash_array->AppendNew<CPDF_Number>(4);
+  dash_array->AppendNew<CPDF_Number>(2);
+  dash->AppendNew<CPDF_Number>(1);
+  line_gs->SetNewFor<CPDF_Number>("FL", 0.5f);
+
+  auto multiply_gs = ext_gstates->SetNewFor<CPDF_Dictionary>("GSa50");
+  multiply_gs->SetNewFor<CPDF_Number>("ca", 0.5f);
+  multiply_gs->SetNewFor<CPDF_Number>("CA", 0.25f);
+  multiply_gs->SetNewFor<CPDF_Name>("BM", "Multiply");
+
+  auto screen_gs = ext_gstates->SetNewFor<CPDF_Dictionary>("GSa20");
+  screen_gs->SetNewFor<CPDF_Number>("ca", 0.25f);
+  screen_gs->SetNewFor<CPDF_Number>("CA", 0.75f);
+  screen_gs->SetNewFor<CPDF_Name>("BM", "Screen");
+}
+
+std::vector<ByteString> GraphicsResourceNames(const CPDF_PageObject* object) {
+  pdfium::span<const ByteString> names = object->GetGraphicsResourceNames();
+  return std::vector<ByteString>(names.begin(), names.end());
+}
+
+}  // namespace
+
+TEST_F(CPDFPageContentGeneratorTest, ProcessExtGState) {
+  auto doc = std::make_unique<CPDF_TestDocument>();
+  doc->CreateNewDoc();
+  auto resources = doc->New<CPDF_Dictionary>();
+  AddExtGStates(doc.get(), resources.Get());
+
+  // In order: a soft mask set up under a matrix; the soft mask turned off
+  // again by a second dictionary; overprint; line parameters from a
+  // dictionary, inside the scope of another dictionary; the same with
+  // operators that override the dictionary; a dictionary that overrides
+  // every entry of the one before it.
+  static constexpr char kContents[] =
+      "q 2 0 0 2 10 20 cm /GSm gs 0 0 1 rg 0 0 50 50 re f Q\n"
+      "q /GSm gs /GSnone gs 0 0.6 0 rg 20 20 260 30 re f Q\n"
+      "q /GSop gs 1 0 0 0 k 60 80 100 100 re f Q\n"
+      "q /GStk gs\n"
+      "q /GSln gs 0 0 0.7 RG 20 175 m 60 145 l S Q\n"
+      "q /GSln gs 2 w 0 J [] 0 d 1 i 20 130 m 60 100 l S Q\n"
+      "Q\n"
+      "q /GSa50 gs /GSa20 gs 0 0 30 30 re f Q\n";
+  RetainPtr<CPDF_Page> page = CreateParsedPage(doc.get(), resources, kContents);
+  ASSERT_EQ(6u, page->GetPageObjectCount());
+
+  // Each object knows the dictionaries that make up its state, in order.
+  using testing::ElementsAre;
+  EXPECT_THAT(GraphicsResourceNames(page->GetPageObjectByIndex(0)),
+              ElementsAre("GSm"));
+  EXPECT_THAT(GraphicsResourceNames(page->GetPageObjectByIndex(1)),
+              ElementsAre("GSm", "GSnone"));
+  EXPECT_THAT(GraphicsResourceNames(page->GetPageObjectByIndex(2)),
+              ElementsAre("GSop"));
+  EXPECT_THAT(GraphicsResourceNames(page->GetPageObjectByIndex(3)),
+              ElementsAre("GStk", "GSln"));
+  EXPECT_THAT(GraphicsResourceNames(page->GetPageObjectByIndex(4)),
+              ElementsAre("GStk", "GSln"));
+  EXPECT_THAT(GraphicsResourceNames(page->GetPageObjectByIndex(5)),
+              ElementsAre("GSa20"));
+
+  CPDF_PageContentGenerator generator(page.Get());
+  auto generate = [&](size_t index) {
+    fxcrt::ostringstream buf;
+    TestProcessPageObject(&generator, &buf, page->GetPageObjectByIndex(index));
+    return ByteString(buf);
+  };
+
+  // The soft mask dictionary is applied under the matrix it was applied
+  // under originally, and the matrix is undone right after.
+  EXPECT_EQ(
+      "q 2 0 0 2 10 20 cm /GSm gs .5 0 0 .5 -5 -10 cm 0 0 1 rg 0 G "
+      "2 0 0 2 10 20 cm 0 0 50 50 re f Q\n",
+      generate(0));
+  // No soft mask in the end, so no matrix either.
+  EXPECT_EQ("q /GSm gs /GSnone gs 0 .6 0 rg 0 G 20 20 260 30 re f Q\n",
+            generate(1));
+  EXPECT_EQ("q /GSop gs 1 0 0 0 k 0 G 60 80 100 100 re f Q\n", generate(2));
+  // The line parameters are written as operators as well. They agree with
+  // the dictionary here.
+  EXPECT_EQ(
+      "q /GStk gs /GSln gs 0 g 0 0 .7 RG 6 w 1 J 1 j 2 M [4 2] 1 d .5 i "
+      "20 175 m 60 145 l S Q\n",
+      generate(3));
+  // And here they do not: the operators come after the dictionary, also
+  // the ones that set a parameter back to its initial value.
+  EXPECT_EQ(
+      "q /GStk gs /GSln gs 0 g 0 G 2 w 0 J 1 j 2 M [] 0 d 1 i "
+      "20 130 m 60 100 l S Q\n",
+      generate(4));
+  EXPECT_EQ("q /GSa20 gs 0 g 0 G 0 0 30 30 re f Q\n", generate(5));
+
+  // Nothing was added to the resources, and the objects kept their names.
+  RetainPtr<const CPDF_Dictionary> ext_gstates =
+      resources->GetDictFor("ExtGState");
+  EXPECT_EQ(7u, ext_gstates->size());
+  EXPECT_THAT(GraphicsResourceNames(page->GetPageObjectByIndex(1)),
+              ElementsAre("GSm", "GSnone"));
+
+  // Parsing the generated content gives the same objects again.
+  ByteString regenerated;
+  for (size_t i = 0; i < 6; ++i) {
+    regenerated += generate(i);
+  }
+  RetainPtr<CPDF_Page> page2 =
+      CreateParsedPage(doc.get(), resources, regenerated.AsStringView());
+  ASSERT_EQ(6u, page2->GetPageObjectCount());
+  CPDF_PageContentGenerator generator2(page2.Get());
+  ByteString regenerated2;
+  for (size_t i = 0; i < 6; ++i) {
+    fxcrt::ostringstream buf;
+    TestProcessPageObject(&generator2, &buf, page2->GetPageObjectByIndex(i));
+    regenerated2 += ByteString(buf);
+  }
+  EXPECT_EQ(regenerated, regenerated2);
+}
+
+TEST_F(CPDFPageContentGeneratorTest, ProcessExtGStateWithChangedAlpha) {
+  auto doc = std::make_unique<CPDF_TestDocument>();
+  doc->CreateNewDoc();
+  auto resources = doc->New<CPDF_Dictionary>();
+  AddExtGStates(doc.get(), resources.Get());
+
+  static constexpr char kContents[] =
+      "q /GSop gs 1 0 0 0 k 60 80 100 100 re f Q\n"
+      "q /GSa50 gs 0 0 30 30 re f Q\n";
+  RetainPtr<CPDF_Page> page = CreateParsedPage(doc.get(), resources, kContents);
+  ASSERT_EQ(2u, page->GetPageObjectCount());
+  CPDF_PageObject* overprinted = page->GetPageObjectByIndex(0);
+  CPDF_PageObject* blended = page->GetPageObjectByIndex(1);
+
+  CPDF_PageContentGenerator generator(page.Get());
+  auto generate = [&](CPDF_PageObject* object) {
+    fxcrt::ostringstream buf;
+    TestProcessPageObject(&generator, &buf, object);
+    return ByteString(buf);
+  };
+  using testing::ElementsAre;
+
+  // The parsed dictionary says nothing about alpha, so the new alpha takes
+  // one more dictionary, after the parsed one.
+  overprinted->mutable_general_state().SetFillAlpha(0.25f);
+  EXPECT_EQ("q /GSop gs 1 0 0 0 k 0 G /FXE1 gs 60 80 100 100 re f Q\n",
+            generate(overprinted));
+  EXPECT_THAT(GraphicsResourceNames(overprinted), ElementsAre("GSop", "FXE1"));
+  RetainPtr<const CPDF_Dictionary> ext_gstates =
+      resources->GetDictFor("ExtGState");
+  RetainPtr<const CPDF_Dictionary> alpha_gs = ext_gstates->GetDictFor("FXE1");
+  ASSERT_TRUE(alpha_gs);
+  EXPECT_EQ(1u, alpha_gs->size());
+  EXPECT_EQ(0.25f, alpha_gs->GetFloatFor("ca"));
+
+  // The parsed dictionary sets alpha and blend mode. Undoing the blend
+  // mode takes the default graphics dictionary, which sets all of them
+  // back, and one more for the alpha values that are to stay.
+  blended->mutable_general_state().SetBlendMode("Normal");
+  EXPECT_EQ("q /GSa50 gs 0 g 0 G /FXE2 gs /FXE3 gs 0 0 30 30 re f Q\n",
+            generate(blended));
+  EXPECT_THAT(GraphicsResourceNames(blended),
+              ElementsAre("GSa50", "FXE2", "FXE3"));
+  RetainPtr<const CPDF_Dictionary> default_gs = ext_gstates->GetDictFor("FXE2");
+  ASSERT_TRUE(default_gs);
+  EXPECT_EQ(1.0f, default_gs->GetFloatFor("ca"));
+  EXPECT_EQ(1.0f, default_gs->GetFloatFor("CA"));
+  EXPECT_EQ("Normal", default_gs->GetNameFor("BM"));
+  RetainPtr<const CPDF_Dictionary> kept_alpha_gs =
+      ext_gstates->GetDictFor("FXE3");
+  ASSERT_TRUE(kept_alpha_gs);
+  EXPECT_EQ(2u, kept_alpha_gs->size());
+  EXPECT_EQ(0.5f, kept_alpha_gs->GetFloatFor("ca"));
+  EXPECT_EQ(0.25f, kept_alpha_gs->GetFloatFor("CA"));
+
+  // Back to what the parsed dictionary says: nothing but that dictionary.
+  blended->mutable_general_state().SetBlendMode("Multiply");
+  EXPECT_EQ("q /GSa50 gs 0 g 0 G 0 0 30 30 re f Q\n", generate(blended));
+  EXPECT_THAT(GraphicsResourceNames(blended), ElementsAre("GSa50"));
+}
+
+TEST_F(CPDFPageContentGeneratorTest, ProcessExtGStateOnAnotherPage) {
+  auto doc = std::make_unique<CPDF_TestDocument>();
+  doc->CreateNewDoc();
+  auto resources = doc->New<CPDF_Dictionary>();
+  AddExtGStates(doc.get(), resources.Get());
+
+  RetainPtr<CPDF_Page> page =
+      CreateParsedPage(doc.get(), resources,
+                       "q 1 0 0 1 5 5 cm /GSm gs /GSop gs 0 0 30 30 re f Q\n");
+  ASSERT_EQ(1u, page->GetPageObjectCount());
+  CPDF_PageObject* object = page->GetPageObjectByIndex(0);
+  RetainPtr<const CPDF_Dictionary> ext_gstates =
+      resources->GetDictFor("ExtGState");
+  RetainPtr<const CPDF_Dictionary> soft_mask_gs =
+      ext_gstates->GetDictFor("GSm");
+  RetainPtr<const CPDF_Dictionary> overprint_gs =
+      ext_gstates->GetDictFor("GSop");
+  ASSERT_EQ(0u, overprint_gs->GetObjNum());
+
+  // On a page without those resources, the dictionaries become resources
+  // of that page under new names. The one that was a direct object becomes
+  // an indirect object, so that both pages refer to the same dictionary.
+  RetainPtr<CPDF_Page> other_page = CreateParsedPage(doc.get(), nullptr, "");
+  CPDF_PageContentGenerator generator(other_page.Get());
+  const char kExpected[] =
+      "q 1 0 0 1 5 5 cm /FXE1 gs 1 0 0 1 -5 -5 cm /FXE2 gs 0 g 0 G "
+      "1 0 0 1 5 5 cm 0 0 30 30 re f Q\n";
+  {
+    fxcrt::ostringstream buf;
+    TestProcessPageObject(&generator, &buf, object);
+    EXPECT_EQ(kExpected, ByteString(buf));
+  }
+  RetainPtr<const CPDF_Dictionary> other_ext_gstates =
+      other_page->GetResources()->GetDictFor("ExtGState");
+  ASSERT_TRUE(other_ext_gstates);
+  EXPECT_EQ(soft_mask_gs, other_ext_gstates->GetDictFor("FXE1"));
+  EXPECT_EQ(overprint_gs, other_ext_gstates->GetDictFor("FXE2"));
+  EXPECT_NE(0u, overprint_gs->GetObjNum());
+  EXPECT_EQ(overprint_gs, ext_gstates->GetDictFor("GSop"));
+  using testing::ElementsAre;
+  EXPECT_THAT(GraphicsResourceNames(object), ElementsAre("FXE1", "FXE2"));
+
+  // Generating again reuses the new resources.
+  {
+    fxcrt::ostringstream buf;
+    TestProcessPageObject(&generator, &buf, object);
+    EXPECT_EQ(kExpected, ByteString(buf));
+  }
+  EXPECT_EQ(2u, other_ext_gstates->size());
+}
+
+TEST_F(CPDFPageContentGeneratorTest, ExtGStateOfInactiveObject) {
+  auto doc = std::make_unique<CPDF_TestDocument>();
+  doc->CreateNewDoc();
+  auto resources = doc->New<CPDF_Dictionary>();
+  AddExtGStates(doc.get(), resources.Get());
+
+  RetainPtr<CPDF_Page> page =
+      CreateParsedPage(doc.get(), resources,
+                       "q /GSop gs 0 0 30 30 re f Q\n"
+                       "q /GSa50 gs 40 40 30 30 re f Q\n");
+  ASSERT_EQ(2u, page->GetPageObjectCount());
+  CPDF_PageObject* overprinted = page->GetPageObjectByIndex(0);
+  RetainPtr<const CPDF_Dictionary> overprint_gs =
+      page->GetResources()->GetDictFor("ExtGState")->GetDictFor("GSop");
+  ASSERT_TRUE(overprint_gs);
+  using testing::ElementsAre;
+
+  // The dictionaries that no active object uses leave the resources.
+  overprinted->SetIsActive(false);
+  {
+    CPDF_PageContentGenerator generator(page.Get());
+    generator.GenerateContent();
+  }
+  RetainPtr<const CPDF_Dictionary> ext_gstates =
+      page->GetResources()->GetDictFor("ExtGState");
+  ASSERT_TRUE(ext_gstates);
+  EXPECT_THAT(ext_gstates->GetKeys(), ElementsAre("FXE1", "GSa50"));
+
+  // And the one of an object that is active again comes back, under the
+  // name it had.
+  overprinted->SetIsActive(true);
+  {
+    CPDF_PageContentGenerator generator(page.Get());
+    generator.GenerateContent();
+  }
+  ext_gstates = page->GetResources()->GetDictFor("ExtGState");
+  ASSERT_TRUE(ext_gstates);
+  EXPECT_THAT(ext_gstates->GetKeys(), ElementsAre("FXE1", "GSa50", "GSop"));
+  EXPECT_EQ(overprint_gs, ext_gstates->GetDictFor("GSop"));
+  EXPECT_THAT(GraphicsResourceNames(overprinted), ElementsAre("GSop"));
+}
+
+TEST_F(CPDFPageContentGeneratorTest, ProcessExtGStateInForm) {
+  auto doc = std::make_unique<CPDF_TestDocument>();
+  doc->CreateNewDoc();
+  auto resources = doc->New<CPDF_Dictionary>();
+  AddExtGStates(doc.get(), resources.Get());
+
+  // A form with resources of its own, a graphics state parameter dictionary
+  // among them.
+  auto form_dict = doc->New<CPDF_Dictionary>();
+  form_dict->SetNewFor<CPDF_Name>("Type", "XObject");
+  form_dict->SetNewFor<CPDF_Name>("Subtype", "Form");
+  auto bbox = form_dict->SetNewFor<CPDF_Array>("BBox");
+  for (int value : {0, 0, 100, 100}) {
+    bbox->AppendNew<CPDF_Number>(value);
+  }
+  auto form_resources = form_dict->SetNewFor<CPDF_Dictionary>("Resources");
+  auto form_ext_gstates =
+      form_resources->SetNewFor<CPDF_Dictionary>("ExtGState");
+  auto form_gs = form_ext_gstates->SetNewFor<CPDF_Dictionary>("GSf");
+  form_gs->SetNewFor<CPDF_Boolean>("OP", true);
+  static constexpr char kFormContents[] =
+      "q /GSf gs 0 0 30 30 re f Q 40 40 30 30 re f";
+  auto form_stream = doc->NewIndirect<CPDF_Stream>(
+      DataVector<uint8_t>(std::begin(kFormContents),
+                          std::end(kFormContents) - 1),
+      std::move(form_dict));
+  auto xobjects = resources->SetNewFor<CPDF_Dictionary>("XObject");
+  xobjects->SetNewFor<CPDF_Reference>("Fm1", doc.get(),
+                                      form_stream->GetObjNum());
+
+  // The page sets up a soft mask, alpha and a blend mode, then paints the
+  // form.
+  RetainPtr<CPDF_Page> page = CreateParsedPage(
+      doc.get(), resources, "q 2 0 0 2 10 20 cm /GSm gs /GSa50 gs /Fm1 Do Q\n");
+  ASSERT_EQ(1u, page->GetPageObjectCount());
+  CPDF_FormObject* form_object = page->GetPageObjectByIndex(0)->AsForm();
+  ASSERT_TRUE(form_object);
+  using testing::ElementsAre;
+  using testing::IsEmpty;
+  EXPECT_THAT(GraphicsResourceNames(form_object), ElementsAre("GSm", "GSa50"));
+
+  // The objects of the form have the state the page set up. The
+  // dictionaries recorded for them are the ones the content stream of the
+  // form applies: those of the page are not resources of the form, and they
+  // apply by themselves whenever the page paints the form.
+  CPDF_Form* form = form_object->form();
+  ASSERT_EQ(2u, form->GetPageObjectCount());
+  CPDF_PageObject* first = form->GetPageObjectByIndex(0);
+  CPDF_PageObject* second = form->GetPageObjectByIndex(1);
+  EXPECT_TRUE(first->general_state().GetSoftMask());
+  EXPECT_EQ(0.5f, first->general_state().GetFillAlpha());
+  EXPECT_THAT(GraphicsResourceNames(first), ElementsAre("GSf"));
+  EXPECT_THAT(GraphicsResourceNames(second), IsEmpty());
+
+  // So the content stream of the form is written with the dictionary of the
+  // form, and without the dictionaries of the page or a matrix for the soft
+  // mask. Alpha and blend mode are written for every object that does not
+  // have the initial values, as they were before; here the values are the
+  // ones the page set up.
+  CPDF_PageContentGenerator form_generator(form);
+  fxcrt::ostringstream buf;
+  ASSERT_TRUE(form_generator.ProcessPageObjects(&buf));
+  EXPECT_EQ(
+      "q /GSf gs 0 g 0 G /FXE1 gs 0 0 30 30 re f Q\n"
+      "q 0 g 0 G /FXE1 gs 40 40 30 30 re f Q\n",
+      ByteString(buf));
+  EXPECT_EQ(2u, form_ext_gstates->size());
+  RetainPtr<const CPDF_Dictionary> alpha_gs =
+      form_ext_gstates->GetDictFor("FXE1");
+  ASSERT_TRUE(alpha_gs);
+  EXPECT_EQ(3u, alpha_gs->size());
+  EXPECT_EQ(0.5f, alpha_gs->GetFloatFor("ca"));
+  EXPECT_EQ(0.25f, alpha_gs->GetFloatFor("CA"));
+  EXPECT_EQ("Multiply", alpha_gs->GetNameFor("BM"));
+  EXPECT_THAT(GraphicsResourceNames(first), ElementsAre("GSf", "FXE1"));
+  EXPECT_THAT(GraphicsResourceNames(second), ElementsAre("FXE1"));
+
+  // The page still applies its dictionaries before it paints the form.
+  CPDF_PageContentGenerator generator(page.Get());
+  fxcrt::ostringstream page_buf;
+  TestProcessPageObject(&generator, &page_buf, form_object);
+  EXPECT_EQ(
+      "q 2 0 0 2 10 20 cm /GSm gs .5 0 0 .5 -5 -10 cm /GSa50 gs 0 g 0 G "
+      "2 0 0 2 10 20 cm /FXX1 Do Q\n",
+      ByteString(page_buf));
+}
+
+TEST_F(CPDFPageContentGeneratorTest, ProcessMiterLimitAndFlatness) {
+  auto doc = std::make_unique<CPDF_TestDocument>();
+  doc->CreateNewDoc();
+
+  RetainPtr<CPDF_Page> page =
+      CreateParsedPage(doc.get(), nullptr,
+                       "q 8 w 1 M 0.25 i 20 20 m 60 70 l 100 20 l S Q\n"
+                       "q 8 w 10 M 1 i 20 20 m 60 70 l 100 20 l S Q\n");
+  ASSERT_EQ(2u, page->GetPageObjectCount());
+
+  CPDF_PageContentGenerator generator(page.Get());
+  auto generate = [&](size_t index) {
+    fxcrt::ostringstream buf;
+    TestProcessPageObject(&generator, &buf, page->GetPageObjectByIndex(index));
+    return ByteString(buf);
+  };
+  EXPECT_EQ("q 0 g 0 G 8 w 1 M .25 i 20 20 m 60 70 l 100 20 l S Q\n",
+            generate(0));
+  // The initial values are not written.
+  EXPECT_EQ("q 0 g 0 G 8 w 20 20 m 60 70 l 100 20 l S Q\n", generate(1));
 }
 
 TEST_F(CPDFPageContentGeneratorTest, ProcessEmptyForm) {

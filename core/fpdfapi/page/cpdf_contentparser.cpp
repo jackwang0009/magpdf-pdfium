@@ -116,6 +116,18 @@ CPDF_ContentParser::CPDF_ContentParser(
     state.SetFillAlpha(1.0f);
     state.SetSoftMask(nullptr);
   }
+  // The graphics state parameter dictionaries recorded so far were applied
+  // by the content stream that paints the form. They are resources of that
+  // stream, and they apply again whenever it paints the form. Only the
+  // dictionaries the form's own content stream applies belong to its
+  // objects.
+  if (!parser_->GetCurStates()
+           ->general_state()
+           .GetGraphicsResourceNames()
+           .empty()) {
+    parser_->GetCurStates()->mutable_general_state().SetGraphicsResources({},
+                                                                          {});
+  }
   single_stream_ = pdfium::MakeRetain<CPDF_StreamAcc>(std::move(pStream));
   single_stream_->LoadAllDataFiltered();
   data_ = single_stream_->GetSpan();

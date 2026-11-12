@@ -979,8 +979,8 @@ void CPDF_StreamContentParser::Handle_SetExtendGraphState() {
   }
 
   CHECK(!name.IsEmpty());
-  cur_states_->mutable_general_state().AppendGraphicsResourceName(
-      std::move(name));
+  cur_states_->mutable_general_state().AppendGraphicsResource(std::move(name),
+                                                              pGS);
   cur_states_->ProcessExtGS(pGS.Get(), this);
 }
 
