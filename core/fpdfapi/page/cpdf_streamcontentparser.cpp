@@ -674,12 +674,18 @@ void CPDF_StreamContentParser::Handle_BeginImage() {
   }
   ReplaceAbbr(dict);
   RetainPtr<const CPDF_Object> pCSObj;
+  // The name of the color space resource the image refers to, if any. The
+  // dictionary may end up holding a copy of the resource instead of the name.
+  ByteString color_space_resource_name;
   if (dict->KeyExist("ColorSpace")) {
     pCSObj = dict->GetDirectObjectFor("ColorSpace");
     if (pCSObj->IsName()) {
       ByteString name = pCSObj->GetString();
       if (name != "DeviceRGB" && name != "DeviceGray" && name != "DeviceCMYK") {
         pCSObj = FindResourceObj("ColorSpace", name);
+        if (pCSObj) {
+          color_space_resource_name = std::move(name);
+        }
         if (pCSObj && pCSObj->IsInline()) {
           dict->SetFor("ColorSpace", pCSObj->Clone());
         }
@@ -701,6 +707,10 @@ void CPDF_StreamContentParser::Handle_BeginImage() {
     }
   }
   CPDF_ImageObject* pObj = AddImageFromStream(std::move(pStream), /*name=*/"");
+  if (pObj && !color_space_resource_name.IsEmpty()) {
+    pObj->GetImage()->SetInlineColorSpaceResource(
+        std::move(color_space_resource_name), std::move(pCSObj));
+  }
   // Record the bounding box of this image, so rendering code can draw it
   // properly.
   if (pObj && pObj->GetImage()->IsMask()) {

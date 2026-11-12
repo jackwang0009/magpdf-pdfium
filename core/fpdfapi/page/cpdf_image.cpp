@@ -96,6 +96,22 @@ RetainPtr<const CPDF_Dictionary> CPDF_Image::GetOC() const {
   return oc_;
 }
 
+void CPDF_Image::SetInlineColorSpaceResource(
+    ByteString name,
+    RetainPtr<const CPDF_Object> object) {
+  inline_color_space_name_ = std::move(name);
+  inline_color_space_object_ = std::move(object);
+}
+
+void CPDF_Image::ReplaceStream(RetainPtr<CPDF_Stream> stream) {
+  stream_ = std::move(stream);
+  // The image data no longer comes from an inline image, even if it did
+  // before: the new stream is written as an image XObject.
+  is_inline_ = false;
+  inline_color_space_name_.clear();
+  inline_color_space_object_.Reset();
+}
+
 RetainPtr<CPDF_Dictionary> CPDF_Image::InitJPEG(
     pdfium::span<uint8_t> src_span) {
   std::optional<JpegModule::ImageInfo> info_opt =
@@ -162,7 +178,8 @@ void CPDF_Image::SetJpegImage(RetainPtr<IFX_SeekableReadStream> pFile) {
     return;
   }
 
-  stream_ = pdfium::MakeRetain<CPDF_Stream>(std::move(pFile), std::move(dict));
+  ReplaceStream(
+      pdfium::MakeRetain<CPDF_Stream>(std::move(pFile), std::move(dict)));
 }
 
 void CPDF_Image::SetJpegImageInline(RetainPtr<IFX_SeekableReadStream> pFile) {
@@ -181,7 +198,8 @@ void CPDF_Image::SetJpegImageInline(RetainPtr<IFX_SeekableReadStream> pFile) {
     return;
   }
 
-  stream_ = pdfium::MakeRetain<CPDF_Stream>(std::move(data), std::move(dict));
+  ReplaceStream(
+      pdfium::MakeRetain<CPDF_Stream>(std::move(data), std::move(dict)));
 }
 
 void CPDF_Image::SetImage(const RetainPtr<CFX_DIBitmap>& pBitmap) {
@@ -314,8 +332,8 @@ void CPDF_Image::SetImage(const RetainPtr<CFX_DIBitmap>& pBitmap) {
     }
   }
 
-  stream_ =
-      pdfium::MakeRetain<CPDF_Stream>(std::move(dest_buf), std::move(dict));
+  ReplaceStream(
+      pdfium::MakeRetain<CPDF_Stream>(std::move(dest_buf), std::move(dict)));
   is_mask_ = pBitmap->IsMaskFormat();
   width_ = BitmapWidth;
   height_ = BitmapHeight;

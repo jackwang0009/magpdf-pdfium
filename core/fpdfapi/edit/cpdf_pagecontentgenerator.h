@@ -24,6 +24,7 @@ class CPDF_ColorSpace;
 class CPDF_ContentMarks;
 class CPDF_Document;
 class CPDF_FormObject;
+class CPDF_Image;
 class CPDF_ImageObject;
 class CPDF_Object;
 class CPDF_PageObject;
@@ -49,6 +50,17 @@ class CPDF_PageContentGenerator {
   void ProcessPath(fxcrt::ostringstream* buf, CPDF_PathObject* pPathObj);
   void ProcessForm(fxcrt::ostringstream* buf, CPDF_FormObject* pFormObj);
   void ProcessImage(fxcrt::ostringstream* buf, CPDF_ImageObject* pImageObj);
+  // Writes an image that was parsed from an inline image as an inline image
+  // again (BI ... ID ... EI), with its data untouched.
+  void ProcessInlineImage(fxcrt::ostringstream* buf,
+                          CPDF_ImageObject* pImageObj);
+  // Writes the /ColorSpace operand of the inline image `image`, whose
+  // dictionary holds `color_space`: the color space itself when an inline
+  // image may spell it out, the name of a color space resource otherwise.
+  // Returns false if there is no way to write the color space.
+  bool WriteInlineImageColorSpace(fxcrt::ostringstream& buf,
+                                  CPDF_Image* image,
+                                  const CPDF_Object* color_space) const;
   void ProcessGraphics(fxcrt::ostringstream* buf, CPDF_PageObject* pPageObj);
   void ProcessDefaultGraphics(fxcrt::ostringstream* buf);
   void ProcessText(fxcrt::ostringstream* buf, CPDF_TextObject* pTextObj);

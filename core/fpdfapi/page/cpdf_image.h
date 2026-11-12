@@ -10,6 +10,7 @@
 #include <stdint.h>
 
 #include "core/fpdfapi/page/cpdf_colorspace.h"
+#include "core/fxcrt/bytestring.h"
 #include "core/fxcrt/retain_ptr.h"
 #include "core/fxcrt/span.h"
 #include "core/fxcrt/unowned_ptr.h"
@@ -19,6 +20,7 @@ class CFX_DIBitmap;
 class CPDF_DIB;
 class CPDF_Dictionary;
 class CPDF_Document;
+class CPDF_Object;
 class CPDF_Page;
 class CPDF_Stream;
 class PauseIndicatorIface;
@@ -45,6 +47,18 @@ class CPDF_Image final : public Retainable {
   int32_t GetPixelWidth() const { return width_; }
   uint32_t GetMatteColor() const { return matte_color_; }
   bool IsInline() const { return is_inline_; }
+  // For an inline image whose /ColorSpace entry named a color space resource:
+  // the resource name and the object it referred to. An inline image can only
+  // use most color spaces by name, so a content stream generator needs the
+  // name to write the image back.
+  void SetInlineColorSpaceResource(ByteString name,
+                                   RetainPtr<const CPDF_Object> object);
+  const ByteString& GetInlineColorSpaceName() const {
+    return inline_color_space_name_;
+  }
+  RetainPtr<const CPDF_Object> GetInlineColorSpaceObject() const {
+    return inline_color_space_object_;
+  }
   bool IsMask() const { return is_mask_; }
   bool IsInterpol() const { return interpolate_; }
 
@@ -81,6 +95,8 @@ class CPDF_Image final : public Retainable {
   ~CPDF_Image() override;
 
   void FinishInitialization();
+  // Replaces the image data with `stream`, which holds new image XObject data.
+  void ReplaceStream(RetainPtr<CPDF_Stream> stream);
   RetainPtr<CPDF_Dictionary> InitJPEG(pdfium::span<uint8_t> src_span);
   RetainPtr<CPDF_Dictionary> CreateXObjectImageDict(int width, int height);
 
@@ -96,6 +112,8 @@ class CPDF_Image final : public Retainable {
   RetainPtr<CFX_DIBBase> mask_;
   RetainPtr<CPDF_Stream> stream_;
   RetainPtr<const CPDF_Dictionary> oc_;
+  ByteString inline_color_space_name_;
+  RetainPtr<const CPDF_Object> inline_color_space_object_;
 };
 
 #endif  // CORE_FPDFAPI_PAGE_CPDF_IMAGE_H_

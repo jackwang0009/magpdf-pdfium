@@ -13,6 +13,8 @@
 #include "core/fpdfapi/page/cpdf_colorspace.h"
 #include "core/fpdfapi/page/cpdf_docpagedata.h"
 #include "core/fpdfapi/page/cpdf_form.h"
+#include "core/fpdfapi/page/cpdf_image.h"
+#include "core/fpdfapi/page/cpdf_imageobject.h"
 #include "core/fpdfapi/page/cpdf_page.h"
 #include "core/fpdfapi/page/cpdf_pathobject.h"
 #include "core/fpdfapi/page/cpdf_textobject.h"
@@ -26,9 +28,11 @@
 #include "core/fpdfapi/parser/cpdf_parser.h"
 #include "core/fpdfapi/parser/cpdf_reference.h"
 #include "core/fpdfapi/parser/cpdf_stream.h"
+#include "core/fpdfapi/parser/cpdf_string.h"
 #include "core/fpdfapi/parser/cpdf_test_document.h"
 #include "core/fxcrt/data_vector.h"
 #include "core/fxge/cfx_fillrenderoptions.h"
+#include "core/fxge/dib/cfx_dibitmap.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 class CPDFPageContentGeneratorTest : public TestWithPageModule {
@@ -59,6 +63,32 @@ class CPDFPageContentGeneratorTest : public TestWithPageModule {
                               const std::vector<CPDF_TextObject*>& texts,
                               const std::vector<size_t>& group_sizes) {
     pGen->WriteTextClipGroup(buf, texts, group_sizes);
+  }
+
+  void TestProcessPageObject(CPDF_PageContentGenerator* pGen,
+                             fxcrt::ostringstream* buf,
+                             CPDF_PageObject* pPageObj) {
+    pGen->ProcessPageObject(buf, pPageObj);
+  }
+
+  // Adds a page to `doc` with `contents` as its content stream and
+  // `resources` (may be null) as its resources, and parses it.
+  RetainPtr<CPDF_Page> CreateParsedPage(CPDF_TestDocument* doc,
+                                        RetainPtr<CPDF_Dictionary> resources,
+                                        ByteStringView contents) {
+    RetainPtr<CPDF_Dictionary> page_dict(
+        doc->CreateNewPage(doc->GetPageCount()));
+    if (resources) {
+      page_dict->SetFor("Resources", std::move(resources));
+    }
+    auto stream = doc->NewIndirect<CPDF_Stream>(
+        DataVector<uint8_t>(contents.unsigned_span().begin(),
+                            contents.unsigned_span().end()),
+        doc->New<CPDF_Dictionary>());
+    page_dict->SetNewFor<CPDF_Reference>("Contents", doc, stream->GetObjNum());
+    auto page = pdfium::MakeRetain<CPDF_Page>(doc, std::move(page_dict));
+    page->ParseContent();
+    return page;
   }
 };
 
@@ -682,6 +712,194 @@ TEST_F(CPDFPageContentGeneratorTest, ProcessTextClipGroup) {
   EXPECT_EQ('q', text_string[0]);
   EXPECT_FALSE(text_string.Contains(" Q\n"));
   EXPECT_TRUE(text_string.Contains(" ET\nBT "));
+}
+
+TEST_F(CPDFPageContentGeneratorTest, ProcessInlineImage) {
+  auto doc = std::make_unique<CPDF_TestDocument>();
+  doc->CreateNewDoc();
+
+  // An Indexed color space that is a direct object in the resources: the
+  // parser copies it into the dictionary of the inline image that names it.
+  auto resources = doc->New<CPDF_Dictionary>();
+  auto color_spaces = resources->SetNewFor<CPDF_Dictionary>("ColorSpace");
+  auto indexed = color_spaces->SetNewFor<CPDF_Array>("CSidx");
+  indexed->AppendNew<CPDF_Name>("Indexed");
+  indexed->AppendNew<CPDF_Name>("DeviceRGB");
+  indexed->AppendNew<CPDF_Number>(1);
+  static constexpr uint8_t kPalette[] = {0xff, 0x8b, 0x00, 0x00, 0x44, 0xaa};
+  indexed->AppendNew<CPDF_String>(kPalette, CPDF_String::DataType::kIsHex);
+
+  // In order: ASCIIHex data, unfiltered data that contains "EI ", an image
+  // mask, the Indexed color space resource, a filter chain with decode
+  // parameters, and an Indexed color space spelled out in the image.
+  static constexpr char kContents[] =
+      "q 60 0 0 40 20 140 cm BI /W 4 /H 4 /CS /G /BPC 8 /F /AHx ID\n"
+      "004080FF4080FF0080FF0040FF004080 >\nEI Q\n"
+      "q 60 0 0 40 100 140 cm BI /W 2 /H 2 /CS /RGB /BPC 8 ID\n"
+      "\xff\x01\x01\x01\xff\x01"
+      "EI \x01\x01\xff\nEI Q\n"
+      "q 0 0.4 0 rg 60 0 0 40 180 140 cm BI /W 8 /H 8 /IM true /BPC 1 "
+      "/D [0 1] /I true /F /AHx ID\nFF81BDA5A5BD81FF >\nEI Q\n"
+      "q 60 0 0 40 20 60 cm BI /W 4 /H 4 /CS /CSidx /BPC 1 /F /AHx ID\n"
+      "A050A050 >\nEI Q\n"
+      "q 60 0 0 40 100 60 cm BI /W 2 /H 1 /CS /G /BPC 8 /F [/AHx /RL] "
+      "/DP [null << /K 1 >>] ID\n01FFFF80 >\nEI Q\n"
+      "q 60 0 0 40 180 60 cm BI /W 4 /H 4 /CS [/I /RGB 1 <FF8B000044AA>] "
+      "/BPC 1 /F /AHx ID\nA050A050 >\nEI Q\n";
+  RetainPtr<CPDF_Page> page = CreateParsedPage(doc.get(), resources, kContents);
+  ASSERT_EQ(6u, page->GetPageObjectCount());
+
+  CPDF_PageContentGenerator generator(page.Get());
+  auto generate = [&](size_t index) {
+    fxcrt::ostringstream buf;
+    TestProcessPageObject(&generator, &buf, page->GetPageObjectByIndex(index));
+    return ByteString(buf);
+  };
+
+  // The dictionary entries come out in the order of their full names, with
+  // the abbreviations the parser expanded, and without the /Length and
+  // /Subtype the parser added. The image data is untouched.
+  EXPECT_EQ(
+      "q 60 0 0 40 20 140 cm BI /BPC 8 /CS /G /F /AHx /H 4 /W 4 ID\n"
+      "004080FF4080FF0080FF0040FF004080 >\nEI Q\n",
+      generate(0));
+  EXPECT_EQ(
+      "q 60 0 0 40 100 140 cm BI /BPC 8 /CS /RGB /H 2 /W 2 ID\n"
+      "\xff\x01\x01\x01\xff\x01"
+      "EI \x01\x01\xff\nEI Q\n",
+      generate(1));
+  // An image mask is painted with the fill color.
+  EXPECT_EQ(
+      "q 0 .4 0 rg 0 G 60 0 0 40 180 140 cm BI /BPC 1 /D [0 1] /F /AHx /H 8 "
+      "/IM true /I true /W 8 ID\nFF81BDA5A5BD81FF >\nEI Q\n",
+      generate(2));
+  // The color space resource is named again, not spelled out.
+  EXPECT_EQ(
+      "q 60 0 0 40 20 60 cm BI /BPC 1 /CS /CSidx /F /AHx /H 4 /W 4 ID\n"
+      "A050A050 >\nEI Q\n",
+      generate(3));
+  EXPECT_EQ(
+      "q 60 0 0 40 100 60 cm BI /BPC 8 /CS /G /DP [null <</K 1 >>] "
+      "/F [/AHx /RL] /H 1 /W 2 ID\n01FFFF80 >\nEI Q\n",
+      generate(4));
+  EXPECT_EQ(
+      "q 60 0 0 40 180 60 cm BI /BPC 1 /CS [/I /RGB 1 <FF8B000044AA>] "
+      "/F /AHx /H 4 /W 4 ID\nA050A050 >\nEI Q\n",
+      generate(5));
+
+  // No resource was added for any of them.
+  EXPECT_EQ(1u, color_spaces->size());
+
+  // Parsing the generated inline images gives the same images again.
+  ByteString regenerated;
+  for (size_t i = 0; i < 6; ++i) {
+    regenerated += generate(i);
+  }
+  RetainPtr<CPDF_Page> page2 =
+      CreateParsedPage(doc.get(), resources, regenerated.AsStringView());
+  ASSERT_EQ(6u, page2->GetPageObjectCount());
+  CPDF_PageContentGenerator generator2(page2.Get());
+  ByteString regenerated2;
+  for (size_t i = 0; i < 6; ++i) {
+    fxcrt::ostringstream buf;
+    TestProcessPageObject(&generator2, &buf, page2->GetPageObjectByIndex(i));
+    regenerated2 += ByteString(buf);
+  }
+  EXPECT_EQ(regenerated, regenerated2);
+}
+
+TEST_F(CPDFPageContentGeneratorTest, ProcessInlineImageOnAnotherPage) {
+  auto doc = std::make_unique<CPDF_TestDocument>();
+  doc->CreateNewDoc();
+
+  // A Lab color space cannot be spelled out in an inline image, only named.
+  auto resources = doc->New<CPDF_Dictionary>();
+  auto color_spaces = resources->SetNewFor<CPDF_Dictionary>("ColorSpace");
+  auto lab = color_spaces->SetNewFor<CPDF_Array>("CSlab");
+  lab->AppendNew<CPDF_Name>("Lab");
+  auto lab_dict = lab->AppendNew<CPDF_Dictionary>();
+  auto white_point = lab_dict->SetNewFor<CPDF_Array>("WhitePoint");
+  white_point->AppendNew<CPDF_Number>(0.9505f);
+  white_point->AppendNew<CPDF_Number>(1.0f);
+  white_point->AppendNew<CPDF_Number>(1.089f);
+
+  static constexpr char kContents[] =
+      "q 60 0 0 40 20 60 cm BI /W 1 /H 1 /CS /CSlab /BPC 8 /F /AHx ID\n"
+      "80FF00 >\nEI Q\n";
+  RetainPtr<CPDF_Page> page = CreateParsedPage(doc.get(), resources, kContents);
+  ASSERT_EQ(1u, page->GetPageObjectCount());
+  CPDF_PageObject* image = page->GetPageObjectByIndex(0);
+
+  // On its own page, the image names the color space as it did.
+  {
+    CPDF_PageContentGenerator generator(page.Get());
+    fxcrt::ostringstream buf;
+    TestProcessPageObject(&generator, &buf, image);
+    EXPECT_EQ(
+        "q 60 0 0 40 20 60 cm BI /BPC 8 /CS /CSlab /F /AHx /H 1 /W 1 ID\n"
+        "80FF00 >\nEI Q\n",
+        ByteString(buf));
+  }
+
+  // On a page without that resource, the color space becomes a resource of
+  // that page under a new name.
+  RetainPtr<CPDF_Page> other_page = CreateParsedPage(doc.get(), nullptr, "");
+  CPDF_PageContentGenerator generator(other_page.Get());
+  const char kExpected[] =
+      "q 60 0 0 40 20 60 cm BI /BPC 8 /CS /FXC1 /F /AHx /H 1 /W 1 ID\n"
+      "80FF00 >\nEI Q\n";
+  {
+    fxcrt::ostringstream buf;
+    TestProcessPageObject(&generator, &buf, image);
+    EXPECT_EQ(kExpected, ByteString(buf));
+  }
+  RetainPtr<const CPDF_Dictionary> other_color_spaces =
+      other_page->GetResources()->GetDictFor("ColorSpace");
+  ASSERT_TRUE(other_color_spaces);
+  RetainPtr<const CPDF_Array> other_lab =
+      other_color_spaces->GetArrayFor("FXC1");
+  ASSERT_TRUE(other_lab);
+  EXPECT_EQ("Lab", other_lab->GetByteStringAt(0));
+
+  // Generating again reuses the new resource.
+  {
+    fxcrt::ostringstream buf;
+    TestProcessPageObject(&generator, &buf, image);
+    EXPECT_EQ(kExpected, ByteString(buf));
+  }
+  EXPECT_EQ(1u, other_color_spaces->size());
+}
+
+TEST_F(CPDFPageContentGeneratorTest, ProcessInlineImageWithNewBitmap) {
+  auto doc = std::make_unique<CPDF_TestDocument>();
+  doc->CreateNewDoc();
+
+  static constexpr char kContents[] =
+      "q 60 0 0 40 20 60 cm BI /W 1 /H 1 /CS /RGB /BPC 8 /F /AHx ID\n"
+      "80FF00 >\nEI Q\n";
+  RetainPtr<CPDF_Page> page = CreateParsedPage(doc.get(), nullptr, kContents);
+  ASSERT_EQ(1u, page->GetPageObjectCount());
+  CPDF_ImageObject* image_obj = page->GetPageObjectByIndex(0)->AsImage();
+  ASSERT_TRUE(image_obj);
+  ASSERT_TRUE(image_obj->GetImage()->IsInline());
+
+  // Replacing the bitmap gives the image the dictionary of an image XObject,
+  // possibly with a soft mask. It can only be written as an XObject.
+  auto bitmap = pdfium::MakeRetain<CFX_DIBitmap>();
+  ASSERT_TRUE(bitmap->Create(2, 2, FXDIB_Format::kBgra));
+  image_obj->GetImage()->SetImage(bitmap);
+  EXPECT_FALSE(image_obj->GetImage()->IsInline());
+
+  CPDF_PageContentGenerator generator(page.Get());
+  fxcrt::ostringstream buf;
+  TestProcessPageObject(&generator, &buf, image_obj);
+  EXPECT_EQ("q 60 0 0 40 20 60 cm /FXX1 Do Q\n", ByteString(buf));
+  RetainPtr<const CPDF_Dictionary> xobjects =
+      page->GetResources()->GetDictFor("XObject");
+  ASSERT_TRUE(xobjects);
+  RetainPtr<const CPDF_Stream> xobject = xobjects->GetStreamFor("FXX1");
+  ASSERT_TRUE(xobject);
+  EXPECT_EQ(2, xobject->GetDict()->GetIntegerFor("Width"));
 }
 
 TEST_F(CPDFPageContentGeneratorTest, ProcessEmptyForm) {
