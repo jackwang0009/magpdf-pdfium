@@ -745,9 +745,8 @@ TEST_F(FPDFEditEmbedderTest, Bug1549) {
 
   ASSERT_TRUE(FPDF_SaveAsCopy(document(), this, 0));
 
-  // TODO(crbug.com/42270554): Color should be 0xff00aeef instead of black,
-  // TODO(crbug.com/42270554): Should be "bug_1549_removed".
-  VerifySavedDocumentWithDisplayList("bug_1549_incorrect");
+  // The DeviceCMYK fill color survives the content stream regeneration.
+  VerifySavedDocumentWithDisplayList("bug_1549_removed");
 }
 
 TEST_F(FPDFEditEmbedderTest, SetText) {
