@@ -129,8 +129,9 @@ class CPDF_PageContentGenerator {
   void WriteClipPath(fxcrt::ostringstream* buf,
                      const CPDF_ClipPath& clip_path);
   // Writes the graphics state of `pPageObj` (ExtGState, color, line width/
-  // cap/join/miter limit/dash, flatness, clip path) without the enclosing
-  // `q`. ProcessGraphics() is `q` + WriteGraphicsState().
+  // cap/join/miter limit/dash, flatness, rendering intent, clip path)
+  // without the enclosing `q`. ProcessGraphics() is `q` +
+  // WriteGraphicsState().
   void WriteGraphicsState(fxcrt::ostringstream* buf,
                           CPDF_PageObject* pPageObj,
                           bool include_clip_path);
@@ -143,6 +144,8 @@ class CPDF_PageContentGenerator {
     float fill_alpha = 1.0f;
     float stroke_alpha = 1.0f;
     BlendMode blend_type = BlendMode::kNormal;
+    // The rendering intent the dictionaries leave.
+    ByteString render_intent;
     // Whether one of the dictionaries sets a parameter that also has an
     // operator of its own.
     bool sets_line_width = false;

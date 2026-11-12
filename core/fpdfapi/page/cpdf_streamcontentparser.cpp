@@ -1110,7 +1110,9 @@ void CPDF_StreamContentParser::Handle_SetRGBColor_Stroke() {
       GetNumbers(3), "DeviceRGB");
 }
 
-void CPDF_StreamContentParser::Handle_SetRenderIntent() {}
+void CPDF_StreamContentParser::Handle_SetRenderIntent() {
+  cur_states_->mutable_general_state().SetRenderIntent(GetString(0));
+}
 
 void CPDF_StreamContentParser::Handle_CloseStrokePath() {
   Handle_ClosePath();

@@ -36,6 +36,20 @@ int RI_StringToId(const ByteString& ri) {
   return 0;
 }
 
+// The inverse of RI_StringToId().
+ByteString RI_IdToString(int id) {
+  switch (id) {
+    case 1:
+      return "AbsoluteColorimetric";
+    case 2:
+      return "Saturation";
+    case 3:
+      return "Perceptual";
+    default:
+      return "RelativeColorimetric";
+  }
+}
+
 BlendMode GetBlendTypeInternal(const ByteString& mode) {
   switch (mode.GetID()) {
     case FXBSTR_ID('N', 'o', 'r', 'm'):
@@ -121,6 +135,11 @@ CPDF_GeneralState::CPDF_GeneralState() = default;
 CPDF_GeneralState::CPDF_GeneralState(const CPDF_GeneralState& that) = default;
 
 CPDF_GeneralState::~CPDF_GeneralState() = default;
+
+ByteString CPDF_GeneralState::GetRenderIntent() const {
+  const StateData* data = ref_.GetObject();
+  return RI_IdToString(data ? data->render_intent_ : 0);
+}
 
 void CPDF_GeneralState::SetRenderIntent(const ByteString& ri) {
   ref_.GetPrivateCopy()->render_intent_ = RI_StringToId(ri);

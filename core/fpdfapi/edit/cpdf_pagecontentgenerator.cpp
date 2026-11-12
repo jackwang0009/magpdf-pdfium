@@ -1889,6 +1889,10 @@ void CPDF_PageContentGenerator::WriteGraphicsState(fxcrt::ostringstream* buf,
   if (flatness != kDefaultFlatness || parsed.sets_flatness) {
     WriteFloat(*buf, flatness) << " i ";
   }
+  ByteString render_intent = general_state.GetRenderIntent();
+  if (render_intent != parsed.render_intent) {
+    *buf << "/" << PDF_NameEncode(render_intent) << " ri ";
+  }
 
   if (include_clip_path) {
     WriteClipPath(buf, pPageObj->clip_path());
@@ -1962,7 +1966,11 @@ CPDF_PageContentGenerator::ParsedExtGStates
 CPDF_PageContentGenerator::WriteParsedExtGStates(
     fxcrt::ostringstream* buf,
     const CPDF_PageObject* pPageObj) const {
+  // Follows what the dictionaries do to the parameters that can be set in
+  // other ways as well, the same way CPDF_AllStates::ProcessExtGS() does.
+  CPDF_GeneralState applied;
   ParsedExtGStates result;
+  result.render_intent = applied.GetRenderIntent();
   const CPDF_GeneralState& general_state = pPageObj->general_state();
   pdfium::span<const RetainPtr<CPDF_Dictionary>> dicts =
       general_state.GetGraphicsResourceDicts();
@@ -1982,9 +1990,6 @@ CPDF_PageContentGenerator::WriteParsedExtGStates(
     soft_mask_matrix = *general_state.GetSMaskMatrix();
   }
 
-  // Follows what the dictionaries do to the parameters that can be changed
-  // after parsing, the same way CPDF_AllStates::ProcessExtGS() does.
-  CPDF_GeneralState applied;
   for (size_t i = 0; i < dicts.size(); ++i) {
     const RetainPtr<CPDF_Dictionary>& dict = dicts[i];
     ByteString name = GetResourceName("ExtGState", dict, stored_names[i]);
@@ -2013,6 +2018,9 @@ CPDF_PageContentGenerator::WriteParsedExtGStates(
       applied.SetBlendMode(array ? array->GetByteStringAt(0)
                                  : mode->GetString());
     }
+    if (RetainPtr<const CPDF_Object> intent = dict->GetDirectObjectFor("RI")) {
+      applied.SetRenderIntent(intent->GetString());
+    }
     result.sets_line_width |= dict->KeyExist("LW");
     result.sets_line_cap |= dict->KeyExist("LC");
     result.sets_line_join |= dict->KeyExist("LJ");
@@ -2023,6 +2031,7 @@ CPDF_PageContentGenerator::WriteParsedExtGStates(
   result.fill_alpha = applied.GetFillAlpha();
   result.stroke_alpha = applied.GetStrokeAlpha();
   result.blend_type = applied.GetBlendType();
+  result.render_intent = applied.GetRenderIntent();
   return result;
 }
 

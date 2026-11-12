@@ -30,6 +30,9 @@ class CPDF_GeneralState {
   void Emplace() { ref_.Emplace(); }
   bool HasRef() const { return !!ref_; }
 
+  // The name of the rendering intent. Names that are not rendering intents
+  // stand for the default one, RelativeColorimetric.
+  ByteString GetRenderIntent() const;
   void SetRenderIntent(const ByteString& ri);
 
   ByteString GetBlendMode() const;

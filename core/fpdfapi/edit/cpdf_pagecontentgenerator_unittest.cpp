@@ -1462,6 +1462,43 @@ TEST_F(CPDFPageContentGeneratorTest, ProcessMiterLimitAndFlatness) {
   EXPECT_EQ("q 0 g 0 G 8 w 20 20 m 60 70 l 100 20 l S Q\n", generate(1));
 }
 
+TEST_F(CPDFPageContentGeneratorTest, ProcessRenderingIntent) {
+  auto doc = std::make_unique<CPDF_TestDocument>();
+  doc->CreateNewDoc();
+  auto resources = doc->New<CPDF_Dictionary>();
+  auto ext_gstates = resources->SetNewFor<CPDF_Dictionary>("ExtGState");
+  auto intent_gs = ext_gstates->SetNewFor<CPDF_Dictionary>("GSri");
+  intent_gs->SetNewFor<CPDF_Name>("RI", "Perceptual");
+
+  // In order: the operator; the operator after a dictionary that sets the
+  // rendering intent; that dictionary alone; the operator with the default
+  // rendering intent, and with a name that is not a rendering intent.
+  RetainPtr<CPDF_Page> page =
+      CreateParsedPage(doc.get(), resources,
+                       "q /Saturation ri 0 0 10 10 re f Q\n"
+                       "q /GSri gs /AbsoluteColorimetric ri 0 0 10 10 re f Q\n"
+                       "q /GSri gs 0 0 10 10 re f Q\n"
+                       "q /RelativeColorimetric ri 0 0 10 10 re f Q\n"
+                       "q /NoSuchIntent ri 0 0 10 10 re f Q\n");
+  ASSERT_EQ(5u, page->GetPageObjectCount());
+
+  CPDF_PageContentGenerator generator(page.Get());
+  auto generate = [&](size_t index) {
+    fxcrt::ostringstream buf;
+    TestProcessPageObject(&generator, &buf, page->GetPageObjectByIndex(index));
+    return ByteString(buf);
+  };
+  EXPECT_EQ("q 0 g 0 G /Saturation ri 0 0 10 10 re f Q\n", generate(0));
+  // The operator comes after the dictionary, as it did.
+  EXPECT_EQ("q /GSri gs 0 g 0 G /AbsoluteColorimetric ri 0 0 10 10 re f Q\n",
+            generate(1));
+  // The dictionary says it all.
+  EXPECT_EQ("q /GSri gs 0 g 0 G 0 0 10 10 re f Q\n", generate(2));
+  // The default rendering intent is not written, under either name.
+  EXPECT_EQ("q 0 g 0 G 0 0 10 10 re f Q\n", generate(3));
+  EXPECT_EQ("q 0 g 0 G 0 0 10 10 re f Q\n", generate(4));
+}
+
 TEST_F(CPDFPageContentGeneratorTest, ProcessEmptyForm) {
   auto doc = std::make_unique<CPDF_TestDocument>();
   doc->CreateNewDoc();
