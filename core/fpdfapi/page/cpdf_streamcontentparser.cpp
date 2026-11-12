@@ -1240,6 +1240,8 @@ void CPDF_StreamContentParser::Handle_ShadeFill() {
       cur_states_->current_transformation_matrix() * mt_content_to_user_;
   auto pObj = std::make_unique<CPDF_ShadingObject>(GetCurrentStreamIndex(),
                                                    pShading, matrix);
+  // Save the resource name, so the object can be written back with it.
+  pObj->SetResourceName(GetString(0));
   SetGraphicStates(pObj.get(), false, false, false);
   CFX_FloatRect bbox =
       pObj->clip_path().HasRef() ? pObj->clip_path().GetClipBox() : bbox_;

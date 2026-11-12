@@ -32,6 +32,7 @@ class CPDF_PageObjectHolder;
 class CPDF_Path;
 class CPDF_PathObject;
 class CPDF_Pattern;
+class CPDF_ShadingObject;
 class CPDF_TextObject;
 
 class CPDF_PageContentGenerator {
@@ -61,6 +62,20 @@ class CPDF_PageContentGenerator {
   bool WriteInlineImageColorSpace(fxcrt::ostringstream& buf,
                                   CPDF_Image* image,
                                   const CPDF_Object* color_space) const;
+  // Writes a shading object as `q <graphics state> <matrix> cm /Name sh Q`.
+  void ProcessShading(fxcrt::ostringstream* buf,
+                      CPDF_ShadingObject* pShadingObj);
+  // Returns the name of the /Shading resource `pShadingObj` paints, adding
+  // the shading to the resources when it is not there. Empty when there is
+  // nothing that could be named.
+  ByteString GetShadingResourceName(
+      const CPDF_ShadingObject* pShadingObj) const;
+  // Returns the name under which `object` is a resource of type `type`
+  // ("Shading", "ExtGState", ...), preferring `preferred_name` when several
+  // names refer to it. Empty when it is not a resource of this page or form.
+  ByteString FindResourceName(ByteStringView type,
+                              const CPDF_Object* object,
+                              const ByteString& preferred_name) const;
   void ProcessGraphics(fxcrt::ostringstream* buf, CPDF_PageObject* pPageObj);
   void ProcessDefaultGraphics(fxcrt::ostringstream* buf);
   void ProcessText(fxcrt::ostringstream* buf, CPDF_TextObject* pTextObj);

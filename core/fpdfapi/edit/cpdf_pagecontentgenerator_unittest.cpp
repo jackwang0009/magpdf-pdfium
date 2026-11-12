@@ -902,6 +902,132 @@ TEST_F(CPDFPageContentGeneratorTest, ProcessInlineImageWithNewBitmap) {
   EXPECT_EQ(2, xobject->GetDict()->GetIntegerFor("Width"));
 }
 
+namespace {
+
+// Makes `shading` an axial shading from red to blue along the x axis.
+void FillAxialShading(CPDF_Dictionary* shading) {
+  shading->SetNewFor<CPDF_Number>("ShadingType", 2);
+  shading->SetNewFor<CPDF_Name>("ColorSpace", "DeviceRGB");
+  auto coords = shading->SetNewFor<CPDF_Array>("Coords");
+  for (int value : {0, 0, 1, 0}) {
+    coords->AppendNew<CPDF_Number>(value);
+  }
+  auto function = shading->SetNewFor<CPDF_Dictionary>("Function");
+  function->SetNewFor<CPDF_Number>("FunctionType", 2);
+  auto domain = function->SetNewFor<CPDF_Array>("Domain");
+  domain->AppendNew<CPDF_Number>(0);
+  domain->AppendNew<CPDF_Number>(1);
+  auto c0 = function->SetNewFor<CPDF_Array>("C0");
+  for (int value : {1, 0, 0}) {
+    c0->AppendNew<CPDF_Number>(value);
+  }
+  auto c1 = function->SetNewFor<CPDF_Array>("C1");
+  for (int value : {0, 0, 1}) {
+    c1->AppendNew<CPDF_Number>(value);
+  }
+  function->SetNewFor<CPDF_Number>("N", 1);
+}
+
+}  // namespace
+
+TEST_F(CPDFPageContentGeneratorTest, ProcessShading) {
+  auto doc = std::make_unique<CPDF_TestDocument>();
+  doc->CreateNewDoc();
+
+  // One shading that is an indirect object, one that is a direct object of
+  // the resources dictionary.
+  auto resources = doc->New<CPDF_Dictionary>();
+  auto shadings = resources->SetNewFor<CPDF_Dictionary>("Shading");
+  auto indirect_shading = doc->NewIndirect<CPDF_Dictionary>();
+  FillAxialShading(indirect_shading.Get());
+  shadings->SetNewFor<CPDF_Reference>("Sh1", doc.get(),
+                                      indirect_shading->GetObjNum());
+  FillAxialShading(shadings->SetNewFor<CPDF_Dictionary>("Sh2").Get());
+
+  static constexpr char kContents[] =
+      "q 10 20 100 50 re W n 2 0 0 2 30 40 cm /Sh1 sh Q\n"
+      "/Sh2 sh\n"
+      "q 1 0 0 1 5 6 cm 3 0 0 3 0 0 cm /Sh1 sh Q\n";
+  RetainPtr<CPDF_Page> page = CreateParsedPage(doc.get(), resources, kContents);
+  ASSERT_EQ(3u, page->GetPageObjectCount());
+  for (size_t i = 0; i < 3; ++i) {
+    ASSERT_TRUE(page->GetPageObjectByIndex(i)->IsShading());
+  }
+
+  CPDF_PageContentGenerator generator(page.Get());
+  auto generate = [&](size_t index) {
+    fxcrt::ostringstream buf;
+    TestProcessPageObject(&generator, &buf, page->GetPageObjectByIndex(index));
+    return ByteString(buf);
+  };
+
+  // The clip, the matrix and the resource name are all kept.
+  EXPECT_EQ("q 10 20 100 50 re W n 2 0 0 2 30 40 cm /Sh1 sh Q\n", generate(0));
+  EXPECT_EQ("q /Sh2 sh Q\n", generate(1));
+  EXPECT_EQ("q 3 0 0 3 5 6 cm /Sh1 sh Q\n", generate(2));
+
+  // No resource was added, and the direct shading stays a direct object.
+  EXPECT_EQ(2u, shadings->size());
+  EXPECT_EQ(0u, shadings->GetDictFor("Sh2")->GetObjNum());
+
+  // Parsing the generated content gives the same objects again.
+  ByteString regenerated = generate(0) + generate(1) + generate(2);
+  RetainPtr<CPDF_Page> page2 =
+      CreateParsedPage(doc.get(), resources, regenerated.AsStringView());
+  ASSERT_EQ(3u, page2->GetPageObjectCount());
+  CPDF_PageContentGenerator generator2(page2.Get());
+  ByteString regenerated2;
+  for (size_t i = 0; i < 3; ++i) {
+    fxcrt::ostringstream buf;
+    TestProcessPageObject(&generator2, &buf, page2->GetPageObjectByIndex(i));
+    regenerated2 += ByteString(buf);
+  }
+  EXPECT_EQ(regenerated, regenerated2);
+}
+
+TEST_F(CPDFPageContentGeneratorTest, ProcessShadingOnAnotherPage) {
+  auto doc = std::make_unique<CPDF_TestDocument>();
+  doc->CreateNewDoc();
+
+  auto resources = doc->New<CPDF_Dictionary>();
+  auto shadings = resources->SetNewFor<CPDF_Dictionary>("Shading");
+  RetainPtr<CPDF_Dictionary> direct_shading =
+      shadings->SetNewFor<CPDF_Dictionary>("Sh1");
+  FillAxialShading(direct_shading.Get());
+
+  RetainPtr<CPDF_Page> page =
+      CreateParsedPage(doc.get(), resources, "50 0 0 50 10 10 cm /Sh1 sh\n");
+  ASSERT_EQ(1u, page->GetPageObjectCount());
+  CPDF_PageObject* shading_obj = page->GetPageObjectByIndex(0);
+  ASSERT_TRUE(shading_obj->IsShading());
+
+  // On a page without that resource, the shading becomes a resource of that
+  // page under a new name. A direct object cannot be shared between two
+  // resources dictionaries, so it becomes an indirect object.
+  RetainPtr<CPDF_Page> other_page = CreateParsedPage(doc.get(), nullptr, "");
+  CPDF_PageContentGenerator generator(other_page.Get());
+  const char kExpected[] = "q 50 0 0 50 10 10 cm /FXS1 sh Q\n";
+  {
+    fxcrt::ostringstream buf;
+    TestProcessPageObject(&generator, &buf, shading_obj);
+    EXPECT_EQ(kExpected, ByteString(buf));
+  }
+  RetainPtr<const CPDF_Dictionary> other_shadings =
+      other_page->GetResources()->GetDictFor("Shading");
+  ASSERT_TRUE(other_shadings);
+  EXPECT_EQ(direct_shading, other_shadings->GetDictFor("FXS1"));
+  EXPECT_NE(0u, direct_shading->GetObjNum());
+  EXPECT_EQ(direct_shading, shadings->GetDictFor("Sh1"));
+
+  // Generating again reuses the new resource.
+  {
+    fxcrt::ostringstream buf;
+    TestProcessPageObject(&generator, &buf, shading_obj);
+    EXPECT_EQ(kExpected, ByteString(buf));
+  }
+  EXPECT_EQ(1u, other_shadings->size());
+}
+
 TEST_F(CPDFPageContentGeneratorTest, ProcessEmptyForm) {
   auto doc = std::make_unique<CPDF_TestDocument>();
   doc->CreateNewDoc();

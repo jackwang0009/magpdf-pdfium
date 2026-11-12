@@ -33,6 +33,8 @@
 #include "core/fpdfapi/page/cpdf_path.h"
 #include "core/fpdfapi/page/cpdf_pathobject.h"
 #include "core/fpdfapi/page/cpdf_pattern.h"
+#include "core/fpdfapi/page/cpdf_shadingobject.h"
+#include "core/fpdfapi/page/cpdf_shadingpattern.h"
 #include "core/fpdfapi/page/cpdf_textobject.h"
 #include "core/fpdfapi/page/cpdf_textstate.h"
 #include "core/fpdfapi/page/cpdf_tilingpattern.h"
@@ -1126,6 +1128,8 @@ void CPDF_PageContentGenerator::ProcessPageObject(fxcrt::ostringstream* buf,
     ProcessPath(buf, pPathObj);
   } else if (CPDF_TextObject* pTextObj = pPageObj->AsText()) {
     ProcessText(buf, pTextObj);
+  } else if (CPDF_ShadingObject* pShadingObj = pPageObj->AsShading()) {
+    ProcessShading(buf, pShadingObj);
   }
   pPageObj->SetDirty(false);
 }
@@ -1323,6 +1327,85 @@ void CPDF_PageContentGenerator::ProcessForm(fxcrt::ostringstream* buf,
 
   *buf << "/" << PDF_NameEncode(name) << " Do";
   EndProcessGraphics(*buf);
+}
+
+// "sh" paints a shading over the current clip, in the coordinate system the
+// CTM sets up. It uses the alpha, blend mode and the rest of the general
+// graphics state, but neither the current color nor the line parameters.
+void CPDF_PageContentGenerator::ProcessShading(
+    fxcrt::ostringstream* buf,
+    CPDF_ShadingObject* pShadingObj) {
+  ByteString name = GetShadingResourceName(pShadingObj);
+  if (name.IsEmpty()) {
+    return;
+  }
+  pShadingObj->SetResourceName(name);
+
+  ProcessGraphics(buf, pShadingObj);
+
+  const CFX_Matrix& matrix = pShadingObj->matrix();
+  if (!matrix.IsIdentity()) {
+    WriteMatrix(*buf, matrix) << " cm ";
+  }
+
+  *buf << "/" << PDF_NameEncode(name) << " sh";
+  EndProcessGraphics(*buf);
+}
+
+ByteString CPDF_PageContentGenerator::GetShadingResourceName(
+    const CPDF_ShadingObject* pShadingObj) const {
+  const CPDF_ShadingPattern* pattern = pShadingObj->pattern();
+  if (!pattern || !pattern->IsShadingObject()) {
+    return ByteString();
+  }
+  // For a shading painted by "sh", the pattern object is the shading
+  // dictionary or stream itself.
+  RetainPtr<CPDF_Object> shading = pattern->GetPatternObj();
+  if (!shading) {
+    return ByteString();
+  }
+
+  ByteString name = FindResourceName("Shading", shading.Get(),
+                                     pShadingObj->GetResourceName());
+  if (!name.IsEmpty()) {
+    return name;
+  }
+
+  // The shading is not in the resources of this page (anymore), which
+  // happens when the object moved here from another page. Add it.
+  if (!document_) {
+    return ByteString();
+  }
+  if (!shading->GetObjNum()) {
+    // A shading dictionary that is a direct object of another resources
+    // dictionary cannot be referenced from here. Make it an indirect object;
+    // the dictionary that holds it writes a reference from then on.
+    document_->AddIndirectObject(shading);
+  }
+  return RealizeResource(shading.Get(), "Shading");
+}
+
+ByteString CPDF_PageContentGenerator::FindResourceName(
+    ByteStringView type,
+    const CPDF_Object* object,
+    const ByteString& preferred_name) const {
+  RetainPtr<const CPDF_Dictionary> resources = obj_holder_->GetResources();
+  RetainPtr<const CPDF_Dictionary> resources_of_type =
+      resources ? resources->GetDictFor(type) : nullptr;
+  if (!resources_of_type) {
+    return ByteString();
+  }
+  if (!preferred_name.IsEmpty() &&
+      resources_of_type->GetDirectObjectFor(preferred_name.AsStringView()) ==
+          object) {
+    return preferred_name;
+  }
+  for (const ByteString& key : resources_of_type->GetKeys()) {
+    if (resources_of_type->GetDirectObjectFor(key.AsStringView()) == object) {
+      return key;
+    }
+  }
+  return ByteString();
 }
 
 // Processing path construction with operators from Table 4.9 of PDF spec 1.7:
