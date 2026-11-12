@@ -24,6 +24,7 @@ class CPDF_Color;
 class CPDF_ColorSpace;
 class CPDF_ContentMarks;
 class CPDF_Document;
+class CPDF_Font;
 class CPDF_FormObject;
 class CPDF_Image;
 class CPDF_ImageObject;
@@ -195,6 +196,10 @@ class CPDF_PageContentGenerator {
                         CPDF_TextObject* pTextObj,
                         bool force_text_matrix,
                         WrittenState* written);
+  // Returns the name of the /Font resource that is `font`, the font of
+  // `pTextObj`, adding the font to the resources when it is not there.
+  ByteString GetFontResourceName(const CPDF_TextObject* pTextObj,
+                                 CPDF_Font* font) const;
   // Whether the font of `pTextObj` can be written back. Type3 fonts cannot:
   // their glyphs are arbitrary content streams. A missing font falls back
   // to Helvetica, which can be written.

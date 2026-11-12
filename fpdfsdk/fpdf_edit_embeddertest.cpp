@@ -1260,9 +1260,10 @@ TEST_F(FPDFEditEmbedderTest, RemoveTextObject) {
   ASSERT_TRUE(FPDF_SaveAsCopy(document(), this, 0));
   VerifySavedDocumentWithDisplayList("hello_world_removed_hello_world");
 
-  // Verify removed/renamed resources are no longer there.
+  // Verify the font of the removed text is no longer there, and the font of
+  // the remaining text still has its name.
   EXPECT_THAT(GetString(), Not(HasSubstr("/F1")));
-  EXPECT_THAT(GetString(), Not(HasSubstr("/F2")));
+  EXPECT_THAT(GetString(), HasSubstr("/F2"));
   EXPECT_THAT(GetString(), Not(HasSubstr("/Times-Roman")));
 }
 
@@ -1312,10 +1313,11 @@ TEST_F(FPDFEditEmbedderTest,
   ASSERT_TRUE(saved_page2);
   VerifySavedRenderingWithDisplayList(saved_page2.get(), "hello_world");
   std::vector<std::string> split_saved_data = StringSplit(GetString(), '\n');
-  // Verify removed/renamed resources are in the save PDF the correct number of
-  // times.
+  // Verify the resources are in the saved PDF the correct number of times:
+  // the font of the removed text is left on page 2 only, the font of the
+  // remaining text is on both pages, under its name.
   EXPECT_THAT(split_saved_data, Contains(HasSubstr("/F1")).Times(1));
-  EXPECT_THAT(split_saved_data, Contains(HasSubstr("/F2")).Times(1));
+  EXPECT_THAT(split_saved_data, Contains(HasSubstr("/F2")).Times(2));
   EXPECT_THAT(split_saved_data, Contains(HasSubstr("/Times-Roman")).Times(1));
 }
 

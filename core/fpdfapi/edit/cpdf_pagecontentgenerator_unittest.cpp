@@ -1558,9 +1558,9 @@ TEST_F(CPDFPageContentGeneratorTest, GraphicsStateInTextClipGroup) {
       "q\n"
       "0 0 0 RG 0 0 0 rg 1 w 0 J 0 j\n"
       "/FXE1 gs q BT 0 g 0 G 3 w 1 J 1 j 2 M [2 1] 0 d .5 i /Saturation ri "
-      "1 0 0 1 10 20 Tm /FXF1 12 Tf 2 Tc 1 Tw 7 Tr [<41>] TJ "
+      "1 0 0 1 10 20 Tm /F1 12 Tf 2 Tc 1 Tw 7 Tr [<41>] TJ "
       "0 g 0 G 1 w 0 J 0 j 10 M [] 0 d 1 i /RelativeColorimetric ri "
-      "1 0 0 1 50 20 Tm /FXF1 12 Tf 0 Tc 0 Tw 7 Tr [<42>] TJ ET\n"
+      "1 0 0 1 50 20 Tm /F1 12 Tf 0 Tc 0 Tw 7 Tr [<42>] TJ ET\n"
       "q 0 g 0 G 1 w 0 J 0 j 10 M [] 0 d 1 i /RelativeColorimetric ri "
       "0 0 100 100 re f Q\n"
       " Q\n"
@@ -1576,9 +1576,9 @@ TEST_F(CPDFPageContentGeneratorTest, GraphicsStateInTextClipGroup) {
       "q\n"
       "0 0 0 RG 0 0 0 rg 1 w 0 J 0 j\n"
       "/FXE1 gs q BT 0 g 0 G 3 w 1 J 1 j 2 M [2 1] 0 d .5 i /Saturation ri "
-      "/FXE2 gs 1 0 0 1 10 20 Tm /FXF1 12 Tf 2 Tc 1 Tw 7 Tr [<41>] TJ "
+      "/FXE2 gs 1 0 0 1 10 20 Tm /F1 12 Tf 2 Tc 1 Tw 7 Tr [<41>] TJ "
       "/FXE1 gs 0 g 0 G 1 w 0 J 0 j 10 M [] 0 d 1 i /RelativeColorimetric ri "
-      "1 0 0 1 50 20 Tm /FXF1 12 Tf 0 Tc 0 Tw 7 Tr [<42>] TJ ET\n"
+      "1 0 0 1 50 20 Tm /F1 12 Tf 0 Tc 0 Tw 7 Tr [<42>] TJ ET\n"
       "q /FXE1 gs 0 g 0 G 1 w 0 J 0 j 10 M [] 0 d 1 i "
       "/RelativeColorimetric ri 0 0 100 100 re f Q\n"
       " Q\n"
@@ -1591,6 +1591,89 @@ TEST_F(CPDFPageContentGeneratorTest, GraphicsStateInTextClipGroup) {
   EXPECT_THAT(GraphicsResourceNames(second_text), ElementsAre("FXE1"));
   EXPECT_THAT(GraphicsResourceNames(clipped_path), ElementsAre("FXE1"));
   EXPECT_THAT(GraphicsResourceNames(other_path), IsEmpty());
+}
+
+TEST_F(CPDFPageContentGeneratorTest, ProcessFontsWithSameBaseFont) {
+  auto doc = std::make_unique<CPDF_TestDocument>();
+  doc->CreateNewDoc();
+  auto resources = doc->New<CPDF_Dictionary>();
+  auto fonts = resources->SetNewFor<CPDF_Dictionary>("Font");
+
+  // Three fonts that are Helvetica, each with an encoding of its own. The
+  // last one is a direct object of the resources.
+  auto plain_font = doc->NewIndirect<CPDF_Dictionary>();
+  plain_font->SetNewFor<CPDF_Name>("Type", "Font");
+  plain_font->SetNewFor<CPDF_Name>("Subtype", "Type1");
+  plain_font->SetNewFor<CPDF_Name>("BaseFont", "Helvetica");
+  plain_font->SetNewFor<CPDF_Name>("Encoding", "WinAnsiEncoding");
+  fonts->SetNewFor<CPDF_Reference>("F1", doc.get(), plain_font->GetObjNum());
+
+  auto bullet_font = doc->NewIndirect<CPDF_Dictionary>();
+  bullet_font->SetNewFor<CPDF_Name>("Type", "Font");
+  bullet_font->SetNewFor<CPDF_Name>("Subtype", "Type1");
+  bullet_font->SetNewFor<CPDF_Name>("BaseFont", "Helvetica");
+  auto encoding = bullet_font->SetNewFor<CPDF_Dictionary>("Encoding");
+  encoding->SetNewFor<CPDF_Name>("BaseEncoding", "WinAnsiEncoding");
+  auto differences = encoding->SetNewFor<CPDF_Array>("Differences");
+  differences->AppendNew<CPDF_Number>(97);
+  differences->AppendNew<CPDF_Name>("bullet");
+  fonts->SetNewFor<CPDF_Reference>("F2", doc.get(), bullet_font->GetObjNum());
+
+  auto direct_font = fonts->SetNewFor<CPDF_Dictionary>("F3");
+  direct_font->SetNewFor<CPDF_Name>("Type", "Font");
+  direct_font->SetNewFor<CPDF_Name>("Subtype", "Type1");
+  direct_font->SetNewFor<CPDF_Name>("BaseFont", "Helvetica");
+  direct_font->SetNewFor<CPDF_Name>("Encoding", "MacRomanEncoding");
+
+  RetainPtr<CPDF_Page> page =
+      CreateParsedPage(doc.get(), resources,
+                       "BT /F1 12 Tf 1 0 0 1 10 20 Tm (a) Tj "
+                       "/F2 12 Tf 1 0 0 1 10 40 Tm (a) Tj "
+                       "/F3 12 Tf 1 0 0 1 10 60 Tm (a) Tj ET\n");
+  ASSERT_EQ(3u, page->GetPageObjectCount());
+
+  // Each text is written with the font it has, under the name the font has.
+  {
+    CPDF_PageContentGenerator generator(page.Get());
+    fxcrt::ostringstream buf;
+    for (size_t i = 0; i < 3; ++i) {
+      TestProcessPageObject(&generator, &buf, page->GetPageObjectByIndex(i));
+    }
+    EXPECT_EQ(
+        "q 0 g 0 G BT 1 0 0 1 10 20 Tm /F1 12 Tf 0 Tr [<61>] TJ ET Q\n"
+        "q 0 g 0 G BT 1 0 0 1 10 40 Tm /F2 12 Tf 0 Tr [<61>] TJ ET Q\n"
+        "q 0 g 0 G BT 1 0 0 1 10 60 Tm /F3 12 Tf 0 Tr [<61>] TJ ET Q\n",
+        ByteString(buf));
+  }
+  using testing::ElementsAre;
+  EXPECT_THAT(fonts->GetKeys(), ElementsAre("F1", "F2", "F3"));
+
+  // On a page without those resources, the fonts that are indirect objects
+  // become resources of that page, one each. The font that is a direct
+  // object of other resources is taken for a standard font, as before.
+  RetainPtr<CPDF_Page> other_page = CreateParsedPage(doc.get(), nullptr, "");
+  {
+    CPDF_PageContentGenerator generator(other_page.Get());
+    fxcrt::ostringstream buf;
+    for (size_t i = 0; i < 3; ++i) {
+      TestProcessPageObject(&generator, &buf, page->GetPageObjectByIndex(i));
+    }
+    EXPECT_EQ(
+        "q 0 g 0 G BT 1 0 0 1 10 20 Tm /FXF1 12 Tf 0 Tr [<61>] TJ ET Q\n"
+        "q 0 g 0 G BT 1 0 0 1 10 40 Tm /FXF2 12 Tf 0 Tr [<61>] TJ ET Q\n"
+        "q 0 g 0 G BT 1 0 0 1 10 60 Tm /FXF3 12 Tf 0 Tr [<61>] TJ ET Q\n",
+        ByteString(buf));
+  }
+  RetainPtr<const CPDF_Dictionary> other_fonts =
+      other_page->GetResources()->GetDictFor("Font");
+  ASSERT_TRUE(other_fonts);
+  EXPECT_EQ(plain_font, other_fonts->GetDictFor("FXF1"));
+  EXPECT_EQ(bullet_font, other_fonts->GetDictFor("FXF2"));
+  RetainPtr<const CPDF_Dictionary> standard_font =
+      other_fonts->GetDictFor("FXF3");
+  ASSERT_TRUE(standard_font);
+  EXPECT_NE(direct_font, standard_font);
+  EXPECT_EQ("Helvetica", standard_font->GetNameFor("BaseFont"));
 }
 
 TEST_F(CPDFPageContentGeneratorTest, ProcessEmptyForm) {

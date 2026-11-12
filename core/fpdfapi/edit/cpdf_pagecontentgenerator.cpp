@@ -2134,6 +2134,56 @@ bool CPDF_PageContentGenerator::CanWriteText(const CPDF_TextObject* pTextObj) {
   return font->IsType1Font() || font->IsTrueTypeFont() || font->IsCIDFont();
 }
 
+ByteString CPDF_PageContentGenerator::GetFontResourceName(
+    const CPDF_TextObject* pTextObj,
+    CPDF_Font* font) const {
+  // A font that is a resource of the holder is written with the name it has
+  // there. Fonts with the same base font and type are not the same font:
+  // they may differ in their encoding, their widths or their font program.
+  RetainPtr<CPDF_Dictionary> font_dict = font->GetMutableFontDict();
+  ByteString name =
+      FindResourceName("Font", font_dict.Get(), pTextObj->GetResourceName());
+  if (!name.IsEmpty()) {
+    return name;
+  }
+  if (!font_dict->IsInline()) {
+    return RealizeResource(font_dict.Get(), "Font");
+  }
+
+  // A font dictionary that is not an indirect object, and not a resource of
+  // the holder either. Assume it is a standard font, like the ones
+  // CPDF_Font::GetStockFont() makes, and write one dictionary for all the
+  // texts of the holder that use it.
+  FontData data;
+  const CPDF_FontEncoding* encoding = nullptr;
+  if (font->IsType1Font()) {
+    data.type = "Type1";
+    encoding = font->AsType1Font()->GetEncoding();
+  } else if (font->IsTrueTypeFont()) {
+    data.type = "TrueType";
+    encoding = font->AsTrueTypeFont()->GetEncoding();
+  } else {
+    data.type = "Type0";
+  }
+  data.baseFont = font->GetBaseFontName();
+  std::optional<ByteString> maybe_name = obj_holder_->FontsMapSearch(data);
+  if (maybe_name.has_value()) {
+    return maybe_name.value();
+  }
+  auto standard_font_dict = document_->New<CPDF_Dictionary>();
+  standard_font_dict->SetNewFor<CPDF_Name>("Type", "Font");
+  standard_font_dict->SetNewFor<CPDF_Name>("Subtype", data.type);
+  standard_font_dict->SetNewFor<CPDF_Name>("BaseFont", data.baseFont);
+  if (encoding) {
+    standard_font_dict->SetFor(
+        "Encoding", encoding->Realize(document_->GetByteStringPool()));
+  }
+  document_->AddIndirectObject(standard_font_dict);
+  name = RealizeResource(standard_font_dict.Get(), "Font");
+  obj_holder_->FontsMapInsert(data, name);
+  return name;
+}
+
 bool CPDF_PageContentGenerator::WriteTextContent(fxcrt::ostringstream* buf,
                                                  CPDF_TextObject* pTextObj,
                                                  bool force_text_matrix,
@@ -2142,49 +2192,16 @@ bool CPDF_PageContentGenerator::WriteTextContent(fxcrt::ostringstream* buf,
   if (!font) {
     font = CPDF_Font::GetStockFont(document_, "Helvetica");
   }
-
-  FontData data;
-  const CPDF_FontEncoding* pEncoding = nullptr;
-  if (font->IsType1Font()) {
-    data.type = "Type1";
-    pEncoding = font->AsType1Font()->GetEncoding();
-  } else if (font->IsTrueTypeFont()) {
-    data.type = "TrueType";
-    pEncoding = font->AsTrueTypeFont()->GetEncoding();
-  } else if (font->IsCIDFont()) {
-    data.type = "Type0";
-  } else {
+  if (!font->IsType1Font() && !font->IsTrueTypeFont() && !font->IsCIDFont()) {
     return false;
   }
-  data.baseFont = font->GetBaseFontName();
 
   const CFX_Matrix& matrix = pTextObj->GetTextMatrix();
   if (force_text_matrix || !matrix.IsIdentity()) {
     WriteMatrix(*buf, matrix) << " Tm ";
   }
 
-  ByteString dict_name;
-  std::optional<ByteString> maybe_name = obj_holder_->FontsMapSearch(data);
-  if (maybe_name.has_value()) {
-    dict_name = std::move(maybe_name.value());
-  } else {
-    RetainPtr<const CPDF_Object> pIndirectFont = font->GetFontDict();
-    if (pIndirectFont->IsInline()) {
-      // In this case we assume it must be a standard font
-      auto font_dict = document_->New<CPDF_Dictionary>();
-      font_dict->SetNewFor<CPDF_Name>("Type", "Font");
-      font_dict->SetNewFor<CPDF_Name>("Subtype", data.type);
-      font_dict->SetNewFor<CPDF_Name>("BaseFont", data.baseFont);
-      if (pEncoding) {
-        font_dict->SetFor("Encoding",
-                          pEncoding->Realize(document_->GetByteStringPool()));
-      }
-      document_->AddIndirectObject(font_dict);
-      pIndirectFont = std::move(font_dict);
-    }
-    dict_name = RealizeResource(std::move(pIndirectFont), "Font");
-    obj_holder_->FontsMapInsert(data, dict_name);
-  }
+  ByteString dict_name = GetFontResourceName(pTextObj, font.Get());
   pTextObj->SetResourceName(dict_name);
 
   *buf << "/" << PDF_NameEncode(dict_name) << " ";
